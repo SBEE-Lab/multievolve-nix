@@ -5,6 +5,8 @@ import os
 import pickle
 import sys
 
+from multievolve.utils.paths import get_output_root
+
 def cache_namespace(fmodel_type, protein):
     """
     Creates a namespace directory for caching feature models of a specific protein.
@@ -17,7 +19,7 @@ def cache_namespace(fmodel_type, protein):
     - str: Path to the namespace directory.
     """
     fmodel_type = fmodel_type.replace('/', '-')
-    root_folder = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    root_folder = get_output_root()
     namespace = f'{root_folder}/proteins/{protein}/feature_cache/{fmodel_type}'
     if not os.path.exists(namespace):
         os.makedirs(namespace)

@@ -10,8 +10,8 @@ import shutil
 
 import os
 import sys
-root_folder = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
+from multievolve.utils.paths import get_output_root
 from multievolve.utils.other_utils import aa_dict_3to1
 from multievolve.utils.data_utils import find_mutation_positions_multithreaded, MutationFormat
 
@@ -63,6 +63,8 @@ class BaseSplitter(ABC):
         self.wt_seq = ''.join(self.wt_seqs)
         self.use_cache = use_cache
         self.random_state = random_state
+
+        root_folder = get_output_root()
 
          # If the data is a CSV file
         if isinstance(data, str) and data.endswith('.csv'):
