@@ -12,7 +12,6 @@ import streamlit as st
 import pandas as pd
 from Bio import SeqIO
 import os
-import wandb
 from pathlib import Path
 import subprocess
 
@@ -186,7 +185,6 @@ def train_models():
             dataset_file = st.file_uploader("Upload Training Dataset (CSV)", type=['csv'], accept_multiple_files=False)
             st.divider()
             experiment_name = st.text_input("Experiment Name", value="test")
-            wandb_key = st.text_input("WandB API Key", type="password")
             mode = st.selectbox("Training Mode", ["test", "standard"])
 
         with col2:
@@ -200,7 +198,6 @@ def train_models():
                 - **Training Dataset (CSV)**: CSV file with columns 'mutation' and 'property_value'. Variants should be formatted as ```A40P/E61Y```, or for protein complexes as ```A40P/E61Y:WT```, where ```:``` separates the individual chains (e.g. ```chain 1 mutations:chain 2 mutations```), ```/``` separates the individual mutations, and ```WT``` indicates the wildtype sequence. A sample dataset for APEX peroxidase can be found in ```data/example_protein/example_dataset.csv```. For a protein complex example, use ```data/example_multichain_protein/example_dataset.csv```.
                 - **Wildtype Amino Acid Sequence FASTA**: Protein sequence in FASTA format. Upload multiple sequence files if working with a protein complex in the same order as you formatted the variants in the training dataset. A sample sequence of APEX peroxidase can be found in ```data/example_protein/apex.fasta```. For a protein complex example, upload in the following order: ```data/example_multichain_protein/vh_chain1.fasta```, ```data/example_multichain_protein/vl_chain2.fasta```.
                 - **Experiment Name**: Name of the model training experiment (e.g. APEX_gridsearch). This should be used for the subsequent step 2 for proposing mutations.
-                - **WandB API Key**: API key for logging to WandB. Create an account and get an API key from [WandB](https://wandb.ai/authorize).
                 - **Training Mode**:
                     - `test`: Test the training process for a single architecture.
                     - `standard`: Performs a grid search over many architectures. Will take a longer time to run.
@@ -209,7 +206,7 @@ def train_models():
         submitted = st.form_submit_button("Train Models", type="primary")
 
     if submitted:
-        if not all([experiment_name, protein_name, wandb_key, wt_files_aa, dataset_file]):
+        if not all([experiment_name, protein_name, wt_files_aa, dataset_file]):
             st.error("Please fill in all required fields")
             return
             
@@ -220,10 +217,7 @@ def train_models():
             protein_dir = Path("proteins") / protein_name
             wt_paths = [protein_dir / wt_file_aa.name for wt_file_aa in wt_files_aa]
             dataset_path = protein_dir / dataset_file.name
-            
-            # Force wandb relogin
-            subprocess.run(["wandb", "login", "--relogin", wandb_key], capture_output=True)
-            
+
             # Show the command that will be executed
             command = [
                 "python", "scripts/p1_train.py",
@@ -231,7 +225,6 @@ def train_models():
                 "--protein-name", protein_name,
                 "--wt-files", ",".join(str(wt_path) for wt_path in wt_paths),
                 "--training-dataset-fname", str(dataset_path),
-                "--wandb-key", wandb_key,
                 "--mode", mode
             ]
             

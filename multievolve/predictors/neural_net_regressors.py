@@ -1,16 +1,12 @@
-import torch, wandb
+import torch
 from torch import nn, optim
 import numpy as np
 import matplotlib.pyplot as plt
-import yaml
 import os
 import pandas as pd
 
 from multievolve.utils.other_utils import performance_report, log_results
 from multievolve.utils.data_utils import TorchDataProcessor
-
-# Get the directory where the script is located
-script_dir = os.path.dirname(__file__)
 
 # Master Functions to Train and Evaluate Models
 def run_nn_model_experiments(splits,
@@ -29,15 +25,15 @@ def run_nn_model_experiments(splits,
         splits (list): List of DataSplitter objects containing train/val/test splits
         features (list): List of feature types to use (e.g. ['onehot', 'esm'])
         models (list): List of model classes to run (e.g. [Fcn, Cnn]) 
-        experiment_name (str): Name for the W&B experiment
+        experiment_name (str): Name for the local sweep result file
         use_cache (bool, optional): Whether to cache results. Defaults to False.
         sweep_depth (str, optional): Sweep type - 'standard', 'custom', 'test'. Defaults to 'standard'.
         search_method (str, optional): Search method - 'grid', 'bayes', 'test'. Defaults to 'grid'.
-        count (int, optional): Number of runs per sweep. Defaults to 10.
+        count (int, optional): Kept for API compatibility; only used by the old W&B bayes backend.
         show_plots (bool, optional): Whether to show matplotlib plots. Defaults to True.
 
     Returns:
-        None: Results are logged to W&B
+        None: Results are written to sweep_results/<experiment_name>.csv
 
     Example:
         >>> splits = [DataSplitter(data, 'random')]
@@ -47,64 +43,25 @@ def run_nn_model_experiments(splits,
         ...                         features, 
         ...                         models, 
         ...                         experiment_name='my_experiment',
-        ...                         sweep_depth='selective',
-        ...                         search_method='bayes',
+        ...                         sweep_depth='test',
+        ...                         search_method='test',
         ...                         show_plots=True)
     """
         
-    for split in splits:
-        for feature in features:
-            for model in models:
-        
-                """Define sweep configuration."""
-                config_map = {
-                    ("Fcn", "standard", "grid"): "fcn_standard_grid_sweep.yaml",
-                    ("Fcn", "standard", "bayes"): "fcn_standard_bayes_sweep.yaml",
-                    ("Fcn", "custom", "grid"): "fcn_custom_grid_sweep.yaml",
-                    ("Fcn", "test", "test"): "fcn_test_sweep.yaml",
-                    ("Cnn", "standard", "grid"): "cnn_standard_grid_sweep.yaml",
-                    ("Cnn", "standard", "bayes"): "cnn_standard_bayes_sweep.yaml",
-                    ("Cnn", "custom", "grid"): "cnn_custom_grid_sweep.yaml",
-                    ("Cnn", "test", "test"): "cnn_test_sweep.yaml",
-                }
+    # Local grid backend (replaces the W&B sweep). Only grid/test are supported.
+    from multievolve.utils.local_sweep import run_local_sweep
 
-                yaml_file = config_map.get((model.__name__, sweep_depth, search_method))
-                if yaml_file is None:
-                    print(
-                        f"Invalid sweep configuration: model={model}, sweep_depth={sweep_depth}, search_method={search_method}."
-                    )
-                    return
-
-                working_script_dir = script_dir
-
-                # Assuming 'script_dir' is defined earlier in your code
-                yaml_file_path = os.path.join(working_script_dir, "sweep_configs", yaml_file)
-
-                with open(yaml_file_path, "r") as file:
-                    sweep_config = yaml.safe_load(file)
-
-
-                """initialize the sweep."""
-                sweep_id = wandb.sweep(sweep=sweep_config, project=experiment_name)
-
-                # Define a train function for hyperparameter sweeps with WANDB
-
-                def train_function():
-                    with wandb.init() as run:
-
-                        # Grab config
-                        config = run.config
-
-                        # Specify model
-                        instance = model(split, feature, use_cache=use_cache, config=config, show_plots=show_plots)
-
-                        # Train and evaluate model
-                        stat = instance.run_model()
-
-                if search_method == "grid" or search_method == "test":
-                    wandb.agent(sweep_id, train_function)
-                elif search_method == "bayes":
-                    wandb.agent(sweep_id, train_function, count=count)
+    run_local_sweep(
+        splits,
+        features,
+        models,
+        experiment_name,
+        use_cache=use_cache,
+        sweep_depth=sweep_depth,
+        search_method=search_method,
+        count=count,
+        show_plots=show_plots,
+    )
 
 
 # Neural network classes
@@ -208,7 +165,7 @@ class BaseNN(nn.Module):
             dict: Dictionary of model performance statistics
         """
 
-        if self.model_path is not None and os.path.exists(self.model_path):
+        if self.use_cache and self.model_path is not None and os.path.exists(self.model_path):
             model = self
             train_loss = self.train_loop_eval_mode(model)
             val_loss = self.val_loop(model)
@@ -221,10 +178,6 @@ class BaseNN(nn.Module):
             for epoch in range(self.epochs):
                 train_loss = self.train_loop(model)
                 val_loss = self.val_loop(model)
-
-                # Log data
-                if wandb.run is not None:
-                    wandb.log({"Train Loss": train_loss, "Val Loss": val_loss})
 
                 # Check for early stopping
                 if self.early_stopping_check(val_loss, epoch) == True:

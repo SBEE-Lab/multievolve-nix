@@ -12,11 +12,9 @@ p1_train.py \
 --protein-name example_protein \
 --wt-files apex.fasta \
 --training-dataset-fname example_dataset.csv \
---wandb-key <key> \
 --mode test
 """
 
-import wandb
 import argparse
 import sys
 import matplotlib
@@ -56,16 +54,11 @@ def parse_args():
         help='Path to the training dataset CSV file'
     )
     parser.add_argument(
-        '-k',
-        '--wandb-key',
-        required=True,
-        help='WandB API key for authentication'
-    )
-    parser.add_argument(
         '-m',
         '--mode',
         required=True,
-        help='Training method of the experiment, options include: test or standard'
+        choices=['test', 'standard'],
+        help='Training method of the experiment'
     )
     args = parser.parse_args()
     args.wt_files = [f.strip() for f in args.wt_files.split(',')]
@@ -77,13 +70,6 @@ def main():
 
     # Parse command line arguments
     args = parse_args()
-
-    try:
-        # Login to WandB
-        wandb.login(key=args.wandb_key)
-    except Exception as e:
-        print(f"Error logging into WandB: {e}")
-        sys.exit(1)
 
     # Define variables
     experiment_name = args.experiment_name
@@ -122,9 +108,9 @@ def main():
     try:
         # Run experiments
         print(f"Running experiments for {experiment_name} with {protein_name}...")        
-        run_nn_model_experiments(splits, 
-                                features, 
-                                models, 
+        run_nn_model_experiments(splits,
+                                features,
+                                models,
                                 experiment_name=experiment_name,
                                 use_cache=False,
                                 sweep_depth=sweep_depth,

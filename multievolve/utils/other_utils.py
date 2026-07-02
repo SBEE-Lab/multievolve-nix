@@ -9,7 +9,6 @@ import scipy.stats as ss
 from scipy.spatial.distance import cdist
 import logging
 import string
-import wandb
 import re
 
 # List of amino acids, including stop codon '*'
@@ -103,42 +102,9 @@ def performance_report(y_true, y_pred):
     }
 
 def log_results(stats_dict, model_object):
-    """
-    Log results to Weights & Biases (wandb).
-    
-    Args:
-    - stats (dict): Dictionary containing performance statistics.
-    - model_object: Object containing model information.
-    """
-    # Wandb logging
-    if wandb.run is not None:
-        # Log the plot to wandb for display
-        wandb.log({"Plot": wandb.Image(model_object.fig)}, commit=False)
-        # Log data
-        wandb.log(
-            {
-                "Model": model_object.model_name,
-                "Feature": model_object.featurizer.name,
-                "Split Method": model_object.split_method,
-                "Test Loss": stats_dict['test']['MSE'],
-                "Spearman - Test": stats_dict['test']['Spearman r'],
-                "Spearman p-value - Test": stats_dict['test']['Spearman p'],
-                "Pearson - Test": stats_dict['test']['Pearson r'],
-                "Pearson p-value - Test": stats_dict['test']['Pearson p'],
-                "NDCG - Test" : stats_dict['test']['NDCG'],
-                "Top 10 Min - Test" : stats_dict['test']['Top 10 Min'],
-                "Top 10 Mean - Test" : stats_dict['test']['Top 10 Mean'],
-                "Top 10 Max - Test" : stats_dict['test']['Top 10 Max'],
-                "Val Loss": stats_dict['val']['MSE'],
-                "Spearman - Val": stats_dict['val']['Spearman r'],
-                "Spearman p-value - Val": stats_dict['val']['Spearman p'],
-                "Pearson - Val": stats_dict['val']['Pearson r'],
-                "Pearson p-value - Val": stats_dict['val']['Pearson p'],
-                "NDCG - Val" : stats_dict['val']['NDCG'],
-                "Top 10 Min - Val" : stats_dict['val']['Top 10 Min'],
-                "Top 10 Mean - Val" : stats_dict['val']['Top 10 Mean'],
-                "Top 10 Max - Val" : stats_dict['val']['Top 10 Max'],
-            })
+    """No-op: metrics are recorded by the local sweep backend (utils.local_sweep)
+    from each run's return value, so per-run W&B logging is not needed."""
+    return
 
 def mkdir_p(path):
     """
