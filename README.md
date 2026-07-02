@@ -76,6 +76,25 @@ In the root directory of the repository run:
 conda activate multievolve
 streamlit run app.py
 ```
+
+With the Nix flake, the packaged app can also be run directly:
+```bash
+nix run .#multievolve-streamlit
+```
+
+For NixOS deployments, import the flake module and enable the service:
+```nix
+{
+  imports = [ inputs.multievolve.nixosModules.multievolve-streamlit ];
+
+  services.multievolve-streamlit = {
+    enable = true;
+    host = "0.0.0.0";
+    port = 8501;
+    openFirewall = true;
+  };
+}
+```
 <p align="center">
   <img src="multievolve/streamlit_1.png" alt="GUI interface image 1" width="600">
 </p>
