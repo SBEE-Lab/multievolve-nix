@@ -47,6 +47,18 @@ dependencies = [
   "streamlit>=1.45",
 ]
 
+[project.scripts]
+multievolve = "multievolve.cli.main:main"
+multievolve-train = "multievolve.cli.train:main"
+multievolve-propose = "multievolve.cli.propose:main"
+multievolve-design-oligos = "multievolve.cli.assembly_design:main"
+multievolve-plm-zeroshot = "multievolve.cli.plm_zeroshot_ensemble:main"
+multievolve-streamlit = "multievolve.cli.streamlit_app:main"
+p1_train = "multievolve.cli.train:main"
+p2_propose = "multievolve.cli.propose:main"
+p3_assembly_design = "multievolve.cli.assembly_design:main"
+plm_zeroshot_ensemble = "multievolve.cli.plm_zeroshot_ensemble:main"
+
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"

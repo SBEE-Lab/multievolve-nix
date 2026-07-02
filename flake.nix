@@ -72,6 +72,7 @@
         python = pkgs.python311;
         cuda = true;
         name = "multievolve";
+        mainProgram = "multievolve";
         overrides = final: prev: {
           fbpca = addBuildSystem final { setuptools = [ ]; } prev.fbpca;
         };
@@ -82,6 +83,10 @@
       # pipeline scripts / Streamlit app as `${multievolve}/bin/python …`.
       packages.${linuxSystem} = rec {
         multievolve = ws.venv;
+        multievolve-streamlit = ws.mkVenv {
+          name = "multievolve-streamlit";
+          mainProgram = "multievolve-streamlit";
+        };
         default = multievolve;
       };
 

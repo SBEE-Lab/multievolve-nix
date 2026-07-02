@@ -9,7 +9,7 @@ In certain iterations, the MULTI-evolve framework involves using a protein langu
 
 ### Command-line
 
-To run MULTI-evolve on the command line refer to the instructions below.
+To run MULTI-evolve on the command line refer to the instructions below. The packaged command is `multievolve` with subcommands (`train`, `propose`, `design-oligos`, and `plm-zeroshot`). The legacy `scripts/*.py` wrappers remain available when running from a source checkout.
 
 Run all the following steps in the folder containing the protein of interest.
 ```bash
@@ -32,7 +32,7 @@ The training dataset must be in CSV format with following columns (refer to the 
 - ```property_value```: the property value
 
 ```bash
-p1_train.py \
+multievolve train \
 --experiment-name <name> \
 --protein-name <name> \
 --wt-files <fasta file> \
@@ -52,7 +52,7 @@ The ```p2_propose.py``` script identifies the best performing neural network mod
 - ```--export-name```: Name of the exported file containing the proposed variants.
 
 ```bash
-p2_propose.py \
+multievolve propose \
 --experiment-name <name> \
 --protein-name <name> \
 --wt-files <fasta file> \
@@ -76,7 +76,7 @@ The ```p3_assembly_design.py``` script generates the MULTI-assembly mutagenic ol
 - ```--output```: Output type. Options are 'design' (to design the oligos) and 'update' (to update the existing oligos).
 
 ```bash
-p3_assembly_design.py \
+multievolve design-oligos \
 --mutations-file <csv file> \
 --wt-fasta <fasta file> \
 --overhang <length of overhang> \
@@ -96,7 +96,7 @@ We recommend running the commands below to ensure that the code and environment 
 conda activate multievolve
 cd data/example_protein
 
-p1_train.py \
+multievolve train \
 --experiment-name multievolve_example \
 --protein-name example_protein \
 --wt-files apex.fasta \
@@ -105,7 +105,7 @@ p1_train.py \
 ```
 
 ```bash
-p2_propose.py \
+multievolve propose \
 --experiment-name multievolve_example \
 --protein-name example_protein \
 --wt-files apex.fasta \
@@ -116,7 +116,7 @@ p2_propose.py \
 ```
 
 ```bash
-p3_assembly_design.py \
+multievolve design-oligos \
 --mutations-file multievolve_proposals.csv \
 --wt-fasta APEX_33overhang.fasta \
 --overhang 33 \
@@ -128,7 +128,7 @@ p3_assembly_design.py \
 
 #### Protein Language Model Zeroshot Ensemble
 
-To perform the protein language model zeroshot ensemble approach implemented in MULTI-evolve, use the ```plm_zeroshot_ensemble.py``` script. An example is provided below. The arguments are as follows:
+To perform the protein language model zeroshot ensemble approach implemented in MULTI-evolve, use the ```multievolve plm-zeroshot``` command. An example is provided below. The arguments are as follows:
 - ```--wt-file```: Path to the FASTA file for the wildtype protein sequence.
 - ```--pdb-files```: Path to the PDB/CIF structure file. Can be a single file or a comma-separated list of files (e.g. ```model_0.cif,model_1.cif```).
 - ```--variants```: Number of variants to nominate per method in the ensemble. Note, there are a total of 4 methods in the ensemble.
@@ -139,7 +139,7 @@ To perform the protein language model zeroshot ensemble approach implemented in 
 conda activate multievolve
 cd data/example_protein
 
-plm_zeroshot_ensemble.py \
+multievolve plm-zeroshot \
 --wt-file apex.fasta \
 --pdb-files apex.cif \
 --variants 24 \
