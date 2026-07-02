@@ -17,10 +17,6 @@ conda activate multievolve
 cd data/example_protein
 ```
 
-#### Step 0: Set Up WandB:
-
-Create a WandB account and get an API key, which is found in 'API keys' under 'User settings'.
-
 #### Step 1: Train Neural Network Models:
 
 The ```p1_train.py``` script takes a protein dataset and trains the neural network models to predict the fitness of a given sequence. The arguments are as follows:
@@ -28,7 +24,6 @@ The ```p1_train.py``` script takes a protein dataset and trains the neural netwo
 - ```--protein-name```: Name of the protein.
 - ```--wt-files```: Path to the FASTA file for the wildtype protein sequence. Can be a single file or a comma-separated list of files for a protein complex, which should be in the same order as how the variants are formatted in the dataset csv file  (e.g. ```chain1.fasta,chain2.fasta```).
 - ```--training-dataset-fname```: Path to the training dataset CSV file. It should contain two columns for the mutation and associated the property value.
-- ```--wandb-key```: WandB API key for authentication.
 - ```--mode```: Training mode. Options are 'test' (to test the training process for a single architecture) and 'standard' (to perform a grid search over many architectures, will take a longer time to run).
 
 The training dataset must be in CSV format with following columns (refer to the example ```data/example_protein/example_dataset.csv```):
@@ -42,7 +37,6 @@ p1_train.py \
 --protein-name <name> \
 --wt-files <fasta file> \
 --training-dataset-fname <csv file> \
---wandb-key <your_wandb_key> \
 --mode [test|standard]
 ```
 
@@ -98,8 +92,6 @@ The ```p3_assembly_design.py``` script will generate two CSV files (```cloning_s
 
 We recommend running the commands below to ensure that the code and environment is working correctly.
 
-Make sure to replace ```<your_wandb_key>``` with your actual WandB API key.
-
 ```bash
 conda activate multievolve
 cd data/example_protein
@@ -109,7 +101,6 @@ p1_train.py \
 --protein-name example_protein \
 --wt-files apex.fasta \
 --training-dataset-fname example_dataset.csv \
---wandb-key <your_wandb_key> \
 --mode test
 ```
 

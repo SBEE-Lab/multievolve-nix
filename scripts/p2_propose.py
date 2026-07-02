@@ -17,8 +17,8 @@ p2_propose.py \
 --export-name multievolve_proposals
 """
 
-import wandb
 import argparse
+import os
 import pandas as pd
 import numpy as np
 from Bio import SeqIO
@@ -29,6 +29,7 @@ from multievolve.splitters import *
 from multievolve.featurizers import *
 from multievolve.predictors import *
 from multievolve.proposers import *
+from multievolve.utils.local_sweep import load_sweep_results
 
 
 def parse_args():
@@ -70,7 +71,6 @@ def parse_args():
         required=True,
         help='Name for export files'
     )
-
     args = parser.parse_args()
     args.wt_files = [f.strip() for f in args.wt_files.split(',')]
     return args
@@ -96,40 +96,8 @@ def main():
     mutation_pool = pd.read_csv(mutation_pool_fname, header=None).values.flatten().tolist()
     wt_seq = "".join([str(SeqIO.read(wt_file, "fasta").seq.upper()) for wt_file in wt_files])
 
-    # Retrieve wandb runs
-    api = wandb.Api()
-    runs = api.runs(experiment_name) # Project is specified by <entity/project-name>
-
-    # Create dataframe of all runs
-
-    ## get column names
-    test_run = runs[0]
-    summary_keys = []
-    for key in test_run.summary._json_dict:
-        if not key.startswith("_"):
-            if key != "Plot":
-                summary_keys.append(key)
-    config_keys = [key for key in test_run.config.keys()]
-    combined_keys = summary_keys + config_keys +['name']
-
-    ## get data from runs
-    values_list = []
-    for run in runs: 
-        values = []
-        # .summary contains the output keys/values for metrics like accuracy.
-        #  We call ._json_dict to omit large files 
-        for key in summary_keys:
-            if run.summary._json_dict.get(key) is not None:
-                values.append(run.summary._json_dict[key])
-            else:
-                values.append(np.inf)
-        for key in config_keys:
-            values.append(run.config[key])
-        values.append(run.name)
-        values_list.append(values)
-
-    ## create starting dataframe
-    df = pd.DataFrame(values_list, columns=combined_keys)
+    # Sweep results recorded locally by training (replaces wandb.Api().runs()).
+    df = load_sweep_results(experiment_name)
 
     ## create condition column to average runs with the same nn architecture across folds later on
     df['condition'] = (

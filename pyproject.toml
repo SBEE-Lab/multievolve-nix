@@ -1,3 +1,81 @@
+[project]
+name = "multievolve"
+version = "0.1.0"
+description = "MULTI-evolve: ML-guided end-to-end framework for engineering hyperactive multi-mutant proteins"
+readme = "README.md"
+license = { text = "MIT" }
+# 3.11: the PyG cu124 wheels (below) are published for cp311.
+requires-python = ">=3.11,<3.12"
+
+# From multievolve's eager import graph (every __init__ does `from … import *`),
+# not setup.py — which omits ankh, transformers, gpytorch, geosketch, fbpca and
+# the torch-geometric C-extensions. jax_unirep is excluded (only the unimported
+# unirep featurizer uses it); GPy too (see below).
+dependencies = [
+  # numpy <2: biotite 0.41.2 is built against the numpy 1.x ABI.
+  "numpy>=1.26,<2",
+  "pandas>=2.2,<3",
+  "scipy>=1.15,<2",
+  "matplotlib>=3.10",
+  "seaborn>=0.13,<0.14",
+  "scikit-learn>=1.6,<2",
+  "scikit-optimize>=0.10",
+  "joblib",
+  "pyyaml",
+  "tqdm",
+  "biopython>=1.85",
+  "biotite==0.41.2", # 0.41.x predates the 1.0/2.0 API break upstream relies on
+  "Levenshtein",
+  "torch==2.6.0",
+  "fair-esm",
+  "ankh",
+  "transformers",
+  # gpytorch/GPy are optional, lazily-imported GP backends unused by the app.
+  # GPy is dropped: GPy>=1.13 caps scipy<=1.12 (vs pinned 1.15) and older GPy
+  # only ships a 2019 Cython sdist. gpytorch is kept (compatible, pure-python).
+  "gpytorch",
+  "geosketch",
+  "fbpca",
+  "protobuf",
+  # torch-geometric is pure-python; its C-extensions come from the PyG flat
+  # index (see [tool.uv.sources]).
+  "torch-geometric",
+  "torch-scatter",
+  "torch-sparse",
+  "torch-cluster",
+  "torch-spline-conv",
+  "streamlit>=1.45",
+]
+
 [build-system]
-requires = ["setuptools>=64.0"]
-build-backend = "setuptools.build_meta" 
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["multievolve*"]
+
+[tool.setuptools.package-data]
+multievolve = [
+  "predictors/sweep_configs/*.yaml",
+  "utils/*.npy", # pca-19.npy, used by the PCA featurizer
+]
+
+# torch 2.6.0 pins nvidia-cusparselt-cu12==0.6.2, a malformed wheel (unpacks to
+# cusparselt/ not nvidia/cusparselt/, so torch can't load libcusparseLt.so.0).
+# 0.7.1 is the first wheel under the nvidia/ namespace; same .so.0 soname.
+[tool.uv]
+override-dependencies = ["nvidia-cusparselt-cu12==0.7.1"]
+
+# PyG flat index for torch 2.6.0+cu124 (the ABI of torch's default PyPI wheel).
+# `explicit` keeps it off every package but the four sources below.
+[[tool.uv.index]]
+name = "pyg"
+url = "https://data.pyg.org/whl/torch-2.6.0+cu124.html"
+format = "flat"
+explicit = true
+
+[tool.uv.sources]
+torch-scatter = { index = "pyg" }
+torch-sparse = { index = "pyg" }
+torch-cluster = { index = "pyg" }
+torch-spline-conv = { index = "pyg" }
