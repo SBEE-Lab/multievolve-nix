@@ -59,6 +59,12 @@ def parse_args():
         required=False,
         help='Comma-separated list of positions to exclude from mutation'
     )
+    parser.add_argument(
+        '--esm-if-device',
+        choices=['auto', 'cpu', 'cuda'],
+        default='auto',
+        help='Device for ESM-IF inference (default: auto)'
+    )
 
     args = parser.parse_args()
 
@@ -77,6 +83,7 @@ def main():
     excluded_positions = args.excluded_positions
     normalizing_method = args.normalizing_method
     chain_id = args.chain_id
+    esm_if_device = args.esm_if_device
 
 
     wt_seq = str(SeqIO.read(wt_file, "fasta").seq)
@@ -87,7 +94,15 @@ def main():
     print('Running ESM-IF zeroshot...')
     esm_if_zeroshot_ls = []
     for pdb_file in pdb_files:
-        esm_if_zeroshot_ls.append(zero_shot_esm_if_dms(wt_seq, pdb_file, chain_id = chain_id, scoring_strategy='wt-marginals'))
+        esm_if_zeroshot_ls.append(
+            zero_shot_esm_if_dms(
+                wt_seq,
+                pdb_file,
+                chain_id=chain_id,
+                scoring_strategy='wt-marginals',
+                device=esm_if_device,
+            )
+        )
 
     def sample_mutations(df, total_muts, excluded_positions):
 

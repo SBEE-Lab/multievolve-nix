@@ -131,6 +131,8 @@ multievolve design-oligos \
 To perform the protein language model zeroshot ensemble approach implemented in MULTI-evolve, use the ```multievolve plm-zeroshot``` command. An example is provided below. The arguments are as follows:
 - ```--wt-file```: Path to the FASTA file for the wildtype protein sequence.
 - ```--pdb-files```: Path to the PDB/CIF structure file. Can be a single file or a comma-separated list of files (e.g. ```model_0.cif,model_1.cif```).
+- ```--chain-id```: Structure chain to score with ESM-IF.
+- ```--esm-if-device```: ESM-IF inference device. `auto` uses CUDA when available and otherwise falls back to CPU; `cpu` and `cuda` select a device explicitly.
 - ```--variants```: Number of variants to nominate per method in the ensemble. Note, there are a total of 4 methods in the ensemble.
 - ```--excluded-positions```: Comma-separated list of positions to exclude from mutation (e.g. ```1,5,20```). If no positions are to be excluded, don't include this argument.
 - ```--normalizing-method```: Method for normalizing fold-change scores to generate z-scores. Options for grouping scores for normalization are 'aa_substitution_type' and 'aa_mutation'. 'aa_substitution_type' refers to grouping scores by the specific amino acid switch (e.g. A->L). 'aa_mutation' refers to grouping scores by the new amino acid provided by the respective mutation (e.g. if the mutation is A10P, it is grouped with all P (Proline) mutations).
@@ -142,6 +144,8 @@ cd data/example_protein
 multievolve plm-zeroshot \
 --wt-file apex.fasta \
 --pdb-files apex.cif \
+--chain-id A \
+--esm-if-device auto \
 --variants 24 \
 --excluded-positions 1,14,41,112 \
 --normalizing-method aa_substitution_type

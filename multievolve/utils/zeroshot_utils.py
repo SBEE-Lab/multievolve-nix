@@ -10,6 +10,20 @@ from tqdm import tqdm
 
 from multievolve.utils.other_utils import read_msa, greedy_select, msa_splicer, AAs
 
+
+def _resolve_esm_if_device(device):
+    """Resolve an ESM-IF device while failing clearly on unavailable CUDA."""
+    if device == "auto":
+        return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    resolved = torch.device(device)
+    if resolved.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA was requested for ESM-IF, but torch cannot access a CUDA device"
+        )
+    return resolved
+
+
 def zero_shot_esm_dms(wt_seq, 
                     model_locations = ['esm1v_t33_650M_UR90S_1',
                     'esm1v_t33_650M_UR90S_2',
@@ -194,9 +208,11 @@ def zero_shot_esm_if_dms(wt_seq, pdb_file, chain_id = 'A', scoring_strategy='wt-
             mutations.append(wt_seq[i] + str(i + 1) + aa)
 
     model_locations = ['esm_if1_gvp4_t16_142M_UR50']
+    device = _resolve_esm_if_device(kwargs.get('device', 'auto'))
 
     model, alphabet = pretrained.load_model_and_alphabet(model_locations[0])
-    model = model.eval()
+    model = model.eval().to(device)
+    print(f'Running ESM-IF on {device}')
 
     structure = esm.inverse_folding.util.load_structure(pdb_file, chain_id)
     coords, native_seq = esm.inverse_folding.util.extract_coords_from_structure(structure)
@@ -206,19 +222,18 @@ def zero_shot_esm_if_dms(wt_seq, pdb_file, chain_id = 'A', scoring_strategy='wt-
     else:
         print(f"Warning: Native sequence from structure ({len(native_seq)} residues) does not match input sequence ({len(wt_seq)} residues)")
 
-    device = next(model.parameters()).device
     batch_converter = CoordBatchConverter(alphabet)
     batch = [(coords, None, wt_seq)]
     coords, confidence, strs, tokens, padding_mask = batch_converter(
         batch, device=device)
 
-    prev_output_tokens = tokens[:, :-1].to(device)
-    target = tokens[:, 1:]
-    logits, _ = model.forward(coords, padding_mask, confidence, prev_output_tokens)
+    prev_output_tokens = tokens[:, :-1]
+    with torch.inference_mode():
+        logits, _ = model.forward(coords, padding_mask, confidence, prev_output_tokens)
 
     # Average model scores and find scores for the mutations-of-interest.
 
-    scores = logits.detach().numpy()[0]
+    scores = logits.detach().cpu().numpy()[0]
     mutation_score = {}
     for pos in range(len(wt_seq)):
         wt = wt_seq[pos]
@@ -440,25 +455,26 @@ def zero_shot_esm_if(
 
     # Compute token probs for each model.
 
+    device = _resolve_esm_if_device(kwargs.get('device', 'auto'))
     model, alphabet = pretrained.load_model_and_alphabet(model_locations[0])
-    model = model.eval()
+    model = model.eval().to(device)
+    print(f'Running ESM-IF on {device}')
 
     structure = esm.inverse_folding.util.load_structure(pdb_file, chain_id)
     coords, native_seq = esm.inverse_folding.util.extract_coords_from_structure(structure)
 
-    device = next(model.parameters()).device
     batch_converter = CoordBatchConverter(alphabet)
     batch = [(coords, None, sequence)]
     coords, confidence, strs, tokens, padding_mask = batch_converter(
         batch, device=device)
 
-    prev_output_tokens = tokens[:, :-1].to(device)
-    target = tokens[:, 1:]
-    logits, _ = model.forward(coords, padding_mask, confidence, prev_output_tokens)
+    prev_output_tokens = tokens[:, :-1]
+    with torch.inference_mode():
+        logits, _ = model.forward(coords, padding_mask, confidence, prev_output_tokens)
 
     # Average model scores and find scores for the mutations-of-interest.
 
-    scores = logits.detach().numpy()[0]
+    scores = logits.detach().cpu().numpy()[0]
     mutation_score = {}
     for pos in range(len(sequence)):
         wt = sequence[pos]
