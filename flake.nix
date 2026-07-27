@@ -79,6 +79,11 @@
       };
     in
     {
+      nixosModules = rec {
+        multievolve-streamlit = import ./nixosModules/multievolve-streamlit.nix { inherit self; };
+        default = multievolve-streamlit;
+      };
+
       # Pure, hash-locked venv with importable `multievolve` + its closure. Run the
       # pipeline scripts / Streamlit app as `${multievolve}/bin/python …`.
       packages.${linuxSystem} = rec {
