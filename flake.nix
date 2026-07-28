@@ -77,6 +77,51 @@
           fbpca = addBuildSystem final { setuptools = [ ]; } prev.fbpca;
         };
       };
+
+      streamlitPackage = ws.mkVenv {
+        name = "multievolve-streamlit";
+        mainProgram = "multievolve-streamlit";
+      };
+
+      streamlitPackageContract = pkgs.runCommand "multievolve-streamlit-package-contract" { } ''
+        export HOME="$TMPDIR"
+        timeout=${pkgs.coreutils}/bin/timeout
+        $timeout 120 ${streamlitPackage}/bin/multievolve-streamlit --help >/dev/null
+        $timeout 120 ${streamlitPackage}/bin/python -m multievolve.cli.train --help >/dev/null
+        $timeout 120 ${streamlitPackage}/bin/python -m multievolve.cli.propose --help >/dev/null
+        $timeout 120 ${streamlitPackage}/bin/python -m multievolve.cli.assembly_design --help >/dev/null
+        $timeout 120 ${streamlitPackage}/bin/python -m multievolve.cli.plm_zeroshot_ensemble --help >/dev/null
+        touch "$out"
+      '';
+
+      invalidModuleConfiguration = lib.nixosSystem {
+        system = linuxSystem;
+        modules = [
+          self.nixosModules.multievolve-streamlit
+          {
+            system.stateVersion = "26.11";
+            services.multievolve-streamlit = {
+              enable = true;
+              package = streamlitPackage;
+              environment.HOME = "/wrong/home";
+              workingDirectory = "/tmp/multievolve";
+            };
+          }
+        ];
+      };
+      failedModuleAssertions = builtins.filter (
+        assertion: !assertion.assertion
+      ) invalidModuleConfiguration.config.assertions;
+      streamlitModuleEvaluationContract =
+        assert lib.any (
+          assertion: lib.hasInfix "environment may not override HOME" assertion.message
+        ) failedModuleAssertions;
+        assert lib.any (
+          assertion: lib.hasInfix "workingDirectory must be a dedicated writable path" assertion.message
+        ) failedModuleAssertions;
+        pkgs.runCommand "multievolve-streamlit-module-evaluation-contract" { } ''
+          touch "$out"
+        '';
     in
     {
       nixosModules = rec {
@@ -88,10 +133,7 @@
       # pipeline scripts / Streamlit app as `${multievolve}/bin/python …`.
       packages.${linuxSystem} = rec {
         multievolve = ws.venv;
-        multievolve-streamlit = ws.mkVenv {
-          name = "multievolve-streamlit";
-          mainProgram = "multievolve-streamlit";
-        };
+        multievolve-streamlit = streamlitPackage;
         default = multievolve;
       };
 
@@ -105,7 +147,15 @@
         {
           formatting = treefmtEval.${system}.config.build.check self;
         }
-        // lib.optionalAttrs (system == linuxSystem) { inherit (ws) venv; }
+        // lib.optionalAttrs (system == linuxSystem) {
+          inherit (ws) venv;
+          multievolve-streamlit-module = import ./nixosTests/multievolve-streamlit.nix {
+            inherit pkgs;
+            module = self.nixosModules.multievolve-streamlit;
+          };
+          multievolve-streamlit-module-evaluation-contract = streamlitModuleEvaluationContract;
+          multievolve-streamlit-package-contract = streamlitPackageContract;
+        }
       );
 
       formatter = eachSystem ({ system, ... }: treefmtEval.${system}.config.build.wrapper);
