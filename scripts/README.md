@@ -48,6 +48,8 @@ multievolve train \
 --device auto
 ```
 
+Training writes a schema-versioned manifest, checksummed per-fold/config checkpoints, and a deterministically reconstructed result table under `sweep_results/<experiment>/`. Re-running the same command reuses validated jobs; a missing or modified aggregate table is rebuilt from those jobs. Reusing an experiment name with different canonical inputs, seeds, folds, software identity, or training settings fails closed; choose a new experiment name instead. Python callers that omit `run_identity` receive a content-derived identity based on the actual splits, grid, seeds, device, and source.
+
 #### Step 2: Propose MULTI-evolve Variants:
 
 The ```p2_propose.py``` script identifies the best performing neural network model and uses it to propose mutations. The arguments are as follows:
@@ -84,7 +86,9 @@ multievolve propose \
 --export-name <name>
 ```
 
-The proposal result includes original-property-unit ensemble mean, standard deviation, minimum, maximum, and model count. The historical `average` column remains an alias for `prediction_mean`. A provenance manifest records seeds, runtime, input hashes, selected architecture, and model artifacts. Fixed seeds improve repeatability, while GPU bitwise identity is only expected when the complete software and hardware environment also matches; `--deterministic` fails if PyTorch encounters an unsupported deterministic operation. If the input is a protein complex, per-chain mutation files are also exported.
+Step 2 verifies the canonical training dataset, WT FASTA, feature, split seed, artifact schema, and software identity against Step 1 before retraining final models. Mismatches fail closed without an override. Each ensemble fold has an atomic model artifact and hash-validated checkpoint, so completed folds are reused after interruption.
+
+The proposal result includes original-property-unit ensemble mean, standard deviation, minimum, maximum, and model count. The historical `average` column remains an alias for `prediction_mean`. Signed property values are supported; NDCG alone shifts negative relevance labels to a nonnegative range, while MSE, correlations, predictions, and top-ranked summaries remain in original property units. A provenance manifest records seeds, runtime, raw and canonical input hashes, selected architecture, job identities, and model artifacts. Fixed seeds improve repeatability, while GPU bitwise identity is only expected when the complete software and hardware environment also matches; `--deterministic` fails if PyTorch encounters an unsupported deterministic operation. If the input is a protein complex, per-chain mutation files are also exported.
 
 #### Step 3: Generate MULTI-assembly Mutagenic Oligos:
 

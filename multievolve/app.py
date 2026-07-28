@@ -206,6 +206,7 @@ def train_models():
                 - **CV Folds**: Number of architecture-selection cross-validation folds (default: 5).
                 - **Training Device**: `auto`, `cpu`, or required `cuda`.
                 - **Deterministic Mode**: Requests deterministic PyTorch algorithms; unsupported operations fail explicitly.
+                - Completed fold/config jobs are checksummed and reused when the same experiment is resumed. Missing or modified aggregate results are rebuilt from valid jobs. Signed property values are supported.
                 """)
 
         submitted = st.form_submit_button("Train Models", type="primary")
@@ -325,6 +326,7 @@ def propose_mutations():
                 - **Ensemble Folds**: Number of final models retrained with the selected architecture (default: 10).
                 - **Training Device**: `auto`, `cpu`, or required `cuda`.
                 - **Deterministic Mode**: Requests deterministic PyTorch algorithms; unsupported operations fail explicitly.
+                - Step 2 requires the same canonical dataset, WT FASTA, feature, split seed, compatible software, and artifact schema as Step 1. Completed ensemble folds are hash-validated and reused. Predictions remain in original property units, including for signed assays.
                 - **Export Name**: Name of the exported csv file containing the list of the proposed variants. This csv file can be used to generate MULTI-assembly mutagenic oligos for cloning the proposed variants in the ```Design MULTI-assembly Oligos``` tab.
                 """)
             with st.expander("Outputs", expanded=False):

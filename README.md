@@ -118,14 +118,23 @@ data/                           # Example datasets
 notebooks/                      # Tutorial and benchmarking notebooks
 scripts/                        # Command-line workflow scripts
 
+sweep_results/                  # Content-addressed training runs
+└── <experiment>/
+    ├── manifest.json           # Input, seed, software, and fold identity
+    ├── jobs/                   # Atomic fold/config checkpoints
+    └── results.csv             # Deterministically reconstructed sweep table
+
 proteins/                       # Cache directory (auto-generated)
 └── <protein_name>/
+    ├── inputs/                 # Immutable content-addressed input evidence
+    │   └── <input-identity>/
     ├── feature_cache/          # Cached featurized sequences by featurizer type
     ├── model_cache/            # Cached predictor objects by dataset
     │   └── <dataset>/
     │       ├── objects/        # Saved models
     │       └── results/        # Model comparison results
     ├── proposers/              # Evaluated proposed sequences
+    │   ├── checkpoints/        # Hash-validated final ensemble folds
     │   └── results/
     └── split_cache/            # Cached splitter objects by dataset
         └── <dataset>/
