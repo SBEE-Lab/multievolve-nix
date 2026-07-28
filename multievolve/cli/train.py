@@ -129,6 +129,7 @@ def main():
             "provenance": {
                 "dataset_raw_sha256": sha256_file(args.training_dataset_fname),
                 "wt_fasta_raw_sha256": [sha256_file(path) for path in args.wt_files],
+                "input_evidence_dir": fold_splitter.file_attrs.get("input_dir"),
                 "runtime": runtime,
             },
             "fold_scalers": [

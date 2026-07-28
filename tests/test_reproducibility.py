@@ -153,6 +153,87 @@ class ReproducibilityTests(unittest.TestCase):
                 else:
                     os.environ["MULTIEVOLVE_ROOT"] = old_root
 
+    def test_split_caches_recover_and_input_evidence_is_content_addressed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old_root = os.environ.get("MULTIEVOLVE_ROOT")
+            os.environ["MULTIEVOLVE_ROOT"] = directory
+            try:
+                root = Path(directory)
+                fasta = root / "wt.fasta"
+                fasta.write_text(">wt\nACDE\n")
+                first_dir = root / "first"
+                second_dir = root / "second"
+                first_dir.mkdir()
+                second_dir.mkdir()
+                first_csv = first_dir / "dataset.csv"
+                second_csv = second_dir / "dataset.csv"
+                sequences = ["ACDE", "VCDE", "ASDE", "ACNE"] * 3
+                pd.DataFrame(
+                    {"mutation": sequences, "property_value": np.arange(12)}
+                ).to_csv(first_csv, index=False)
+                pd.DataFrame(
+                    {"mutation": sequences, "property_value": np.arange(12) + 100}
+                ).to_csv(second_csv, index=False)
+
+                first = KFoldProteinSplitter(
+                    "cache-test",
+                    str(first_csv),
+                    str(fasta),
+                    csv_has_header=True,
+                    use_cache=True,
+                    random_state=42,
+                    y_scaling=True,
+                    val_split=0.25,
+                    cache_identity="first-input",
+                )
+                first_splits = first.generate_splits(2)
+                second = KFoldProteinSplitter(
+                    "cache-test",
+                    str(second_csv),
+                    str(fasta),
+                    csv_has_header=True,
+                    use_cache=True,
+                    random_state=42,
+                    y_scaling=True,
+                    val_split=0.25,
+                    cache_identity="second-input",
+                )
+                self.assertNotEqual(
+                    first.file_attrs["dataset_file"],
+                    second.file_attrs["dataset_file"],
+                )
+                self.assertEqual(
+                    pd.read_csv(second.file_attrs["dataset_file"])["property_value"].iloc[0],
+                    100,
+                )
+
+                Path(first.file_attrs["base_splitter_path"]).write_bytes(b"corrupt")
+                split_path = Path(first.file_attrs["split_dir"]) / (
+                    first_splits[0].splits["split_name"] + ".pkl"
+                )
+                split_path.write_bytes(b"corrupt")
+                recovered = KFoldProteinSplitter(
+                    "cache-test",
+                    str(first_csv),
+                    str(fasta),
+                    csv_has_header=True,
+                    use_cache=True,
+                    random_state=42,
+                    y_scaling=True,
+                    val_split=0.25,
+                    cache_identity="first-input",
+                ).generate_splits(2)
+                self.assertEqual(recovered[0].splits["split_name"], first_splits[0].splits["split_name"])
+                np.testing.assert_array_equal(
+                    recovered[0].splits["X_train"],
+                    first_splits[0].splits["X_train"],
+                )
+            finally:
+                if old_root is None:
+                    os.environ.pop("MULTIEVOLVE_ROOT", None)
+                else:
+                    os.environ["MULTIEVOLVE_ROOT"] = old_root
+
     def test_fcn_seeds_layers_before_initialization(self):
         config = {
             "layer_size": 4,
