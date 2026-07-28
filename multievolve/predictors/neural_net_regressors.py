@@ -10,7 +10,7 @@ from multievolve.utils.other_utils import performance_report, log_results
 from multievolve.utils.data_utils import TorchDataProcessor
 from multievolve.utils.reproducibility import resolve_device, seed_everything
 
-_MODEL_SCHEMA_VERSION = 2
+_MODEL_SCHEMA_VERSION = 3
 
 # Master Functions to Train and Evaluate Models
 def run_nn_model_experiments(splits,
@@ -119,6 +119,8 @@ class BaseNN(nn.Module):
             self.kwargs["config"].get("dataloader_seed", self.seed)
         )
         self.deterministic = bool(self.kwargs["config"].get("deterministic", False))
+        self.cache_identity = self.kwargs["config"].get("cache_identity")
+        self.force_retrain = bool(self.kwargs["config"].get("force_retrain", False))
         seed_everything(self.seed, deterministic=self.deterministic)
         self.device = torch.device(resolve_device(self.kwargs["config"].get("device", "auto")))
 
@@ -155,13 +157,13 @@ class BaseNN(nn.Module):
                      f"epochs{self.kwargs['config']['epochs']} __ " +
                      f"seed{self.seed} __ loader{self.dataloader_seed} __ " +
                      f"{self.device.type} __ "
-                     f"deterministic{int(self.deterministic)} __ v{_MODEL_SCHEMA_VERSION}"
+                     f"deterministic{int(self.deterministic)} __ "
+                     f"identity{str(self.cache_identity or 'legacy')[:16]} __ v{_MODEL_SCHEMA_VERSION}"
                      )
         
         self.model_path = os.path.join(self.file_attrs['model_dir'], 'objects', f'{self.file_attrs["model_name"]}.pth')
 
-        # Load model if available 
-        if self.model_path is not None and os.path.exists(self.model_path) and self.use_cache:
+        if self._cached_model_available():
             self.load_model(model_path=None)
             self.to(self.device)
         else: 
@@ -180,7 +182,7 @@ class BaseNN(nn.Module):
             dict: Dictionary of model performance statistics
         """
 
-        if not (self.use_cache and self.model_path is not None and os.path.exists(self.model_path)):
+        if not self._cached_model_available():
             for epoch in range(self.epochs):
                 self.train_loop(self)
                 val_loss = self.val_loop(self)
@@ -198,6 +200,14 @@ class BaseNN(nn.Module):
             return self.evaluate(self)
         return None
     
+    def _cached_model_available(self):
+        return (
+            self.use_cache
+            and not self.force_retrain
+            and self.model_path is not None
+            and os.path.exists(self.model_path)
+        )
+
     def load_model(self, model_path=None):
         """Load a pre-trained model from disk.
 
@@ -227,9 +237,16 @@ class BaseNN(nn.Module):
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
 
-        # Save the model
-        print(f"Saving model to {self.model_path}")
-        torch.save(model.state_dict(), self.model_path)
+        print(f"Saving model to {model_path}")
+        temporary = f"{model_path}.{os.getpid()}.tmp"
+        try:
+            torch.save(model.state_dict(), temporary)
+            with open(temporary, "rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temporary, model_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def forward(self, x):
         """Forward pass through the network.

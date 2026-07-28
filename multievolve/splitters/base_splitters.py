@@ -15,7 +15,21 @@ from multievolve.utils.other_utils import aa_dict_3to1
 from multievolve.utils.data_utils import find_mutation_positions_multithreaded, MutationFormat
 from multievolve.utils.reproducibility import stable_seed
 
-_SPLIT_SCHEMA_VERSION = 2
+_SPLIT_SCHEMA_VERSION = 3
+
+
+def _atomic_pickle(value, path):
+    temporary = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(temporary, "wb") as handle:
+            pickle.dump(value, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
 
 class BaseSplitter(ABC):
     """Abstract base class for splitters."""
@@ -39,7 +53,7 @@ class BaseSplitter(ABC):
     """
 
     def __init__(self, name, data, wt_file, csv_has_header=False, use_cache=False,
-                 random_state=42, type='biomolecules',
+                 random_state=42, type='biomolecules', cache_identity=None,
                  **kwargs):
         """
         Args:
@@ -65,6 +79,7 @@ class BaseSplitter(ABC):
         self.wt_seq = ''.join(self.wt_seqs)
         self.use_cache = use_cache
         self.random_state = random_state
+        self.cache_identity = cache_identity
 
         root_folder = get_output_root()
 
@@ -161,9 +176,12 @@ class ProteinSplitter(BaseSplitter):
         self.val_split = val_split
         self.kfold_splits = False
 
+        cache_suffix = (
+            f"_{str(self.cache_identity)[:16]}" if self.cache_identity is not None else ""
+        )
         self.file_attrs['base_splitter_path'] = os.path.join(
             self.file_attrs['split_dir'],
-            f"base_splitter_{self.y_scaling}_v{_SPLIT_SCHEMA_VERSION}.pkl",
+            f"base_splitter_{self.y_scaling}{cache_suffix}_v{_SPLIT_SCHEMA_VERSION}.pkl",
         )
 
         # Load existing base protein splitter or create a new one
@@ -195,7 +213,7 @@ class ProteinSplitter(BaseSplitter):
 
             # save as pickle file
             if self.use_cache:
-                self.data.to_pickle(self.file_attrs['base_splitter_path'])
+                _atomic_pickle(self.data, self.file_attrs['base_splitter_path'])
 
     def _shift_mutation_position(self, inputs, lengths, type):
         # inputs is a list of mutation strings or mutation lists
@@ -253,6 +271,8 @@ class ProteinSplitter(BaseSplitter):
         split_identity = f"seed{self.random_state}"
         if hasattr(self, "fold_count"):
             split_identity += f"_folds{self.fold_count}"
+        if self.cache_identity is not None:
+            split_identity += f"_identity{str(self.cache_identity)[:16]}"
 
         if self.val_split is not None:
 
@@ -349,9 +369,8 @@ class ProteinSplitter(BaseSplitter):
 
         if self.use_cache:
             if not os.path.exists(file_name):
-                with open(file_name, 'wb') as file:
-                    print("Split saved.")
-                    pickle.dump(self.splits, file)
+                print("Split saved.")
+                _atomic_pickle(self.splits, file_name)
             
             else:
                 with open(file_name, 'rb') as file:

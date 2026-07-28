@@ -88,27 +88,92 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def source_identity() -> dict[str, Any]:
-    """Describe the source checkout when available."""
+def canonical_csv_sha256(path: str | Path, *, header: bool = True) -> str:
+    """Hash parsed CSV content while ignoring byte-level formatting differences."""
+    import pandas as pd
+
+    frame = pd.read_csv(path, header=0 if header else None, keep_default_na=False)
+    canonical = frame.to_csv(index=False, header=header, lineterminator="\n")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def canonical_fasta_sha256(path: str | Path) -> str:
+    """Hash the uppercase FASTA sequence independently of its header and wrapping."""
+    sequence = "".join(
+        line.strip()
+        for line in Path(path).read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith(">")
+    ).upper()
+    if not sequence:
+        raise ValueError(f"FASTA contains no sequence: {path}")
+    return hashlib.sha256(sequence.encode("ascii")).hexdigest()
+
+
+def atomic_write_json(path: str | Path, value: Any) -> None:
+    """Atomically replace a JSON file in its destination directory."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
     try:
-        root = Path(__file__).resolve().parents[2]
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def source_identity() -> dict[str, Any]:
+    """Describe a checkout, including its dirty content, or its installed path."""
+    root = Path(__file__).resolve().parents[2]
+    try:
         revision = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
-        dirty = bool(
-            subprocess.run(
-                ["git", "-C", str(root), "status", "--porcelain"],
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        dirty_sha256 = None
+        if status:
+            digest = hashlib.sha256()
+            digest.update(
+                subprocess.run(
+                    ["git", "-C", str(root), "diff", "--binary", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                ).stdout
+            )
+            untracked = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"],
                 check=True,
                 capture_output=True,
-                text=True,
-            ).stdout
-        )
-        return {"revision": revision, "dirty": dirty}
+            ).stdout.split(b"\0")
+            for relative_bytes in sorted(path for path in untracked if path):
+                relative = relative_bytes.decode("utf-8")
+                digest.update(relative_bytes)
+                digest.update(sha256_file(root / relative).encode("ascii"))
+            dirty_sha256 = digest.hexdigest()
+        return {
+            "revision": revision,
+            "dirty": bool(status),
+            "dirty_sha256": dirty_sha256,
+            "location": None,
+        }
     except (OSError, subprocess.CalledProcessError):
-        return {"revision": None, "dirty": None}
+        return {
+            "revision": None,
+            "dirty": None,
+            "dirty_sha256": None,
+            "location": str(root),
+        }
 
 
 def runtime_identity(device: str) -> dict[str, Any]:
