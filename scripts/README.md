@@ -24,7 +24,12 @@ The ```p1_train.py``` script takes a protein dataset and trains the neural netwo
 - ```--protein-name```: Name of the protein.
 - ```--wt-files```: Path to the FASTA file for the wildtype protein sequence. Can be a single file or a comma-separated list of files for a protein complex, which should be in the same order as how the variants are formatted in the dataset csv file  (e.g. ```chain1.fasta,chain2.fasta```).
 - ```--training-dataset-fname```: Path to the training dataset CSV file. It should contain two columns for the mutation and associated the property value.
-- ```--mode```: Training mode. Options are 'test' (to test the training process for a single architecture) and 'standard' (to perform a grid search over many architectures, will take a longer time to run).
+- ```--mode```: Training mode. Options are 'test' (one architecture) and 'standard' (the complete static grid).
+- ```--seed```: Base seed used to derive a stable seed for every fold/config model (default: 42).
+- ```--split-seed```: Fold-assignment seed (default: `--seed`).
+- ```--cv-folds```: Number of architecture-selection cross-validation folds (default: 5).
+- ```--device```: Training device: `auto`, `cpu`, or required `cuda` (default: `auto`).
+- ```--deterministic```: Request deterministic PyTorch algorithms. Unsupported deterministic operations fail explicitly.
 
 The training dataset must be in CSV format with following columns (refer to the example ```data/example_protein/example_dataset.csv```):
 
@@ -37,8 +42,13 @@ multievolve train \
 --protein-name <name> \
 --wt-files <fasta file> \
 --training-dataset-fname <csv file> \
---mode [test|standard]
+--mode [test|standard] \
+--seed 42 \
+--cv-folds 5 \
+--device auto
 ```
+
+Training writes a schema-versioned manifest, checksummed per-fold/config checkpoints, and a deterministically reconstructed result table under `sweep_results/<experiment>/`. Re-running the same command reuses validated jobs; a missing or modified aggregate table is rebuilt from those jobs. Reusing an experiment name with different canonical inputs, seeds, folds, software identity, or training settings fails closed; choose a new experiment name instead. Python callers that omit `run_identity` receive a content-derived identity based on the actual splits, grid, seeds, device, and source.
 
 #### Step 2: Propose MULTI-evolve Variants:
 
@@ -47,8 +57,16 @@ The ```p2_propose.py``` script identifies the best performing neural network mod
 - ```--protein-name```: Name of the protein.
 - ```--wt-files```: Path to the FASTA file for the wildtype protein sequence. Can be a single file or a comma-separated list of files (e.g. ```chain1.fasta,chain2.fasta```) for a protein complex.
 - ```--training-dataset```: Path to the training dataset CSV file.
-- ```--mutation-pool```: Path to the mutation pool CSV file, which is a list of mutations to be used to generate the proposed combinatorial variants. Example is provided in ```data/example_protein/combo_muts.csv```.
+- ```--mutation-pool```: Path to a one-column, no-header CSV of validated single substitutions used to generate combinatorial variants. Example: ```data/example_protein/combo_muts.csv```.
+- ```--min-mutations```: Minimum number of substitutions per proposed variant (default: 3).
+- ```--max-mutations```: Maximum number of substitutions per proposed variant (default: 10). The bounded CLI now defaults to 3–10; the previous implementation hard-coded loads 2–11. The paper's experiments support prioritizing variants with at most 7 substitutions.
 - ```--top-muts-per-load```: Number of variants to clone per mutational load (default: 3).
+- ```--max-candidates```: Safety limit checked before model training and candidate generation (default: 100000).
+- ```--seed```: Base seed used to derive each final ensemble-model seed (default: 42).
+- ```--split-seed```: Final fold-assignment seed (default: `--seed`).
+- ```--ensemble-folds```: Number of final models retrained with the selected architecture (default: 10).
+- ```--device```: Training device: `auto`, `cpu`, or required `cuda` (default: `auto`).
+- ```--deterministic```: Request deterministic PyTorch algorithms.
 - ```--export-name```: Name of the exported file containing the proposed variants.
 
 ```bash
@@ -58,11 +76,19 @@ multievolve propose \
 --wt-files <fasta file> \
 --training-dataset <csv file> \
 --mutation-pool <csv file> \
+--min-mutations 3 \
+--max-mutations 7 \
 --top-muts-per-load <number of mutants> \
+--max-candidates 100000 \
+--seed 42 \
+--ensemble-folds 10 \
+--device auto \
 --export-name <name>
 ```
 
-The ```p2_propose.py``` script will generate a CSV file (e.g. ```multievolve_proposals.csv```) containing the proposed variants. If it is a protein complex, it will export files for each chain (e.g. ```multievolve_proposals_chain_1_mutants.csv```)
+Step 2 verifies the canonical training dataset, WT FASTA, feature, split seed, artifact schema, and software identity against Step 1 before retraining final models. Mismatches fail closed without an override. Each ensemble fold has an atomic model artifact and hash-validated checkpoint, so completed folds are reused after interruption.
+
+The proposal result includes original-property-unit ensemble mean, standard deviation, minimum, maximum, and model count. The historical `average` column remains an alias for `prediction_mean`. Signed property values are supported; NDCG alone shifts negative relevance labels to a nonnegative range, while MSE, correlations, predictions, and top-ranked summaries remain in original property units. A provenance manifest records seeds, runtime, raw and canonical input hashes, selected architecture, job identities, and model artifacts. Fixed seeds improve repeatability, while GPU bitwise identity is only expected when the complete software and hardware environment also matches; `--deterministic` fails if PyTorch encounters an unsupported deterministic operation. If the input is a protein complex, per-chain mutation files are also exported.
 
 #### Step 3: Generate MULTI-assembly Mutagenic Oligos:
 
@@ -101,7 +127,10 @@ multievolve train \
 --protein-name example_protein \
 --wt-files apex.fasta \
 --training-dataset-fname example_dataset.csv \
---mode test
+--mode test \
+--seed 42 \
+--cv-folds 5 \
+--device auto
 ```
 
 ```bash
@@ -111,7 +140,13 @@ multievolve propose \
 --wt-files apex.fasta \
 --training-dataset example_dataset.csv \
 --mutation-pool combo_muts.csv \
+--min-mutations 3 \
+--max-mutations 7 \
 --top-muts-per-load 3 \
+--max-candidates 100000 \
+--seed 42 \
+--ensemble-folds 10 \
+--device auto \
 --export-name multievolve_proposals
 ```
 

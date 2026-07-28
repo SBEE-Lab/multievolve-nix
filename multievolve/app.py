@@ -8,18 +8,13 @@ This app provides an interactive web app to:
 4. Perform zero-shot predictions with protein language models
 """
 
-import streamlit as st
-import pandas as pd
-from Bio import SeqIO
-import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
-from multievolve.splitters import *
-from multievolve.featurizers import *
-from multievolve.predictors import *
-from multievolve.proposers import *
+import pandas as pd
+import streamlit as st
+from Bio import SeqIO
 
 def setup_page():
     """Configure basic Streamlit page settings"""
@@ -135,14 +130,14 @@ def validate_files(protein_name, wt_files_aa=None, wt_file_aa=None,wt_file_dna=N
         if wt_files_aa:
             for wt_file_aa in wt_files_aa:
                 fasta_path = save_uploaded_file(wt_file_aa, protein_dir)
-                wt_seq_aa = str(SeqIO.read(fasta_path, "fasta").seq.upper())
+                SeqIO.read(fasta_path, "fasta")
         elif wt_file_aa:
             fasta_path = save_uploaded_file(wt_file_aa, protein_dir)
-            wt_seq_aa = str(SeqIO.read(fasta_path, "fasta").seq.upper())
+            SeqIO.read(fasta_path, "fasta")
 
         if wt_file_dna:
             fasta_path = save_uploaded_file(wt_file_dna, protein_dir)
-            wt_seq_dna = str(SeqIO.read(fasta_path, "fasta").seq.upper())
+            SeqIO.read(fasta_path, "fasta")
 
         # Validate and save dataset CSV
         if dataset_file:
@@ -187,6 +182,11 @@ def train_models():
             st.divider()
             experiment_name = st.text_input("Experiment Name", value="test")
             mode = st.selectbox("Training Mode", ["test", "standard"])
+            seed = st.number_input("Seed", min_value=0, max_value=2**32 - 1, value=42)
+            split_seed = st.number_input("Split Seed", min_value=0, max_value=2**32 - 1, value=42)
+            cv_folds = st.number_input("CV Folds", min_value=2, value=5)
+            device = st.selectbox("Training Device", ["auto", "cpu", "cuda"])
+            deterministic = st.checkbox("Deterministic Mode", value=False)
 
         with col2:
             st.markdown("""
@@ -202,6 +202,11 @@ def train_models():
                 - **Training Mode**:
                     - `test`: Test the training process for a single architecture.
                     - `standard`: Performs a grid search over many architectures. Will take a longer time to run.
+                - **Seed/Split Seed**: Base model seed and fold-assignment seed.
+                - **CV Folds**: Number of architecture-selection cross-validation folds (default: 5).
+                - **Training Device**: `auto`, `cpu`, or required `cuda`.
+                - **Deterministic Mode**: Requests deterministic PyTorch algorithms; unsupported operations fail explicitly.
+                - Completed fold/config jobs are checksummed and reused when the same experiment is resumed. Missing or modified aggregate results are rebuilt from valid jobs. Signed property values are supported.
                 """)
 
         submitted = st.form_submit_button("Train Models", type="primary")
@@ -226,8 +231,14 @@ def train_models():
                 "--protein-name", protein_name,
                 "--wt-files", ",".join(str(wt_path) for wt_path in wt_paths),
                 "--training-dataset-fname", str(dataset_path),
-                "--mode", mode
+                "--mode", mode,
+                "--seed", str(seed),
+                "--split-seed", str(split_seed),
+                "--cv-folds", str(cv_folds),
+                "--device", device,
             ]
+            if deterministic:
+                command.append("--deterministic")
 
             st.subheader("Terminal Output:")
             st.code(f"$ {' '.join(command)}", language="bash")
@@ -285,7 +296,15 @@ def propose_mutations():
             mutation_pool = st.file_uploader("Upload Mutation Pool (CSV)", type=['csv'])
             st.divider()
             experiment_name = st.text_input("Experiment Name", key="propose_exp")
+            min_mutations = st.number_input("Minimum Mutations", min_value=2, value=3)
+            max_mutations = st.number_input("Maximum Mutations", min_value=2, value=10)
             top_muts = st.number_input("Top Mutations per Load", min_value=1, value=3)
+            max_candidates = st.number_input("Maximum Candidates", min_value=1, value=100000)
+            seed = st.number_input("Seed", min_value=0, max_value=2**32 - 1, value=42, key="propose_seed")
+            split_seed = st.number_input("Split Seed", min_value=0, max_value=2**32 - 1, value=42, key="propose_split_seed")
+            ensemble_folds = st.number_input("Ensemble Folds", min_value=2, value=10)
+            device = st.selectbox("Training Device", ["auto", "cpu", "cuda"], key="propose_device")
+            deterministic = st.checkbox("Deterministic Mode", value=False, key="propose_deterministic")
             export_name = st.text_input("Export Name", value="multievolve_proposals")
 
         with col2:
@@ -300,7 +319,14 @@ def propose_mutations():
                 - **Training Dataset (CSV)**: CSV file with columns 'mutation' and 'property_value'. Same file as Step 1. A sample dataset for APEX peroxidase can be found in ```data/example_protein/example_dataset.csv```. For a protein complex example, use ```data/example_multichain_protein/example_dataset.csv```.
                 - **Mutation Pool (CSV)**: Path to the mutation pool CSV file, which is a list of mutations to be used to generate the proposed combinatorial variants. It is a one column no header CSV file. Example is provided in ```data/example_protein/combo_muts.csv```. For a protein complex example, use ```data/example_multichain_protein/combo_muts.csv```.
                 - **Experiment Name**: Name of the model training experiment (e.g. APEX_gridsearch). Same experiment name as Step 1.
+                - **Minimum/Maximum Mutations**: Inclusive mutational-load range to generate. The CLI retains the historical 3–10 defaults; the paper's experiments support prioritizing variants with at most 7 substitutions.
                 - **Top Mutations per Load**: Number of top mutations to propose per mutational load.
+                - **Maximum Candidates**: Safety limit checked before final model training and combinatorial candidate generation.
+                - **Seed/Split Seed**: Base ensemble-model seed and fold-assignment seed.
+                - **Ensemble Folds**: Number of final models retrained with the selected architecture (default: 10).
+                - **Training Device**: `auto`, `cpu`, or required `cuda`.
+                - **Deterministic Mode**: Requests deterministic PyTorch algorithms; unsupported operations fail explicitly.
+                - Step 2 requires the same canonical dataset, WT FASTA, feature, split seed, compatible software, and artifact schema as Step 1. Completed ensemble folds are hash-validated and reused. Predictions remain in original property units, including for signed assays.
                 - **Export Name**: Name of the exported csv file containing the list of the proposed variants. This csv file can be used to generate MULTI-assembly mutagenic oligos for cloning the proposed variants in the ```Design MULTI-assembly Oligos``` tab.
                 """)
             with st.expander("Outputs", expanded=False):
@@ -314,6 +340,9 @@ def propose_mutations():
     if submitted:
         if not all([experiment_name, protein_name, wt_files_aa, dataset_file, mutation_pool, export_name]):
             st.error("Please fill in all required fields")
+            return
+        if min_mutations > max_mutations:
+            st.error("Minimum Mutations must be less than or equal to Maximum Mutations")
             return
 
         if not validate_files(protein_name, wt_files_aa=wt_files_aa, dataset_file=dataset_file, mutations_file=mutation_pool):
@@ -333,9 +362,18 @@ def propose_mutations():
                 "--wt-files", ",".join(str(wt_path) for wt_path in wt_paths),
                 "--training-dataset", str(dataset_path),
                 "--mutation-pool", str(mutation_pool_path),
+                "--min-mutations", str(min_mutations),
+                "--max-mutations", str(max_mutations),
                 "--top-muts-per-load", str(top_muts),
+                "--max-candidates", str(max_candidates),
+                "--seed", str(seed),
+                "--split-seed", str(split_seed),
+                "--ensemble-folds", str(ensemble_folds),
+                "--device", device,
                 "--export-name", export_name
             ]
+            if deterministic:
+                command.append("--deterministic")
 
             st.subheader("Terminal Output:")
             st.code(f"$ {' '.join(command)}", language="bash")

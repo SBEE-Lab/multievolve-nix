@@ -1,6 +1,6 @@
 import random
 import pandas as pd
-from abc import ABC, abstractmethod
+from abc import ABC
 from Bio import SeqIO, PDB
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
@@ -9,11 +9,105 @@ import copy
 import shutil
 
 import os
-import sys
 
 from multievolve.utils.paths import get_output_root
 from multievolve.utils.other_utils import aa_dict_3to1
 from multievolve.utils.data_utils import find_mutation_positions_multithreaded, MutationFormat
+from multievolve.utils.reproducibility import (
+    atomic_write_json,
+    sha256_file,
+    sha256_json,
+    stable_seed,
+)
+
+_SPLIT_SCHEMA_VERSION = 3
+
+
+def _atomic_pickle(value, path):
+    temporary = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(temporary, "wb") as handle:
+            pickle.dump(value, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _atomic_copy(source, destination):
+    temporary = f"{destination}.{os.getpid()}.tmp"
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    try:
+        with open(source, "rb") as source_handle, open(temporary, "wb") as output:
+            shutil.copyfileobj(source_handle, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _atomic_dataframe_csv(frame, destination):
+    temporary = f"{destination}.{os.getpid()}.tmp"
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="") as handle:
+            frame.to_csv(handle, index=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _load_cached_pickle(path):
+    try:
+        with open(path, "rb") as handle:
+            return pickle.load(handle)
+    except Exception as exc:
+        print(f"Warning: ignoring invalid split cache {path}: {exc}")
+        return None
+
+
+def _valid_base_data(value):
+    return isinstance(value, pd.DataFrame) and {
+        0,
+        1,
+        "mut_positions",
+        "muts",
+        "mut_load",
+    }.issubset(value.columns)
+
+
+def _valid_split(value, *, split_name, has_validation, scaled):
+    if not isinstance(value, dict) or value.get("split_name") != split_name:
+        return False
+    required = {"X_train", "X_test", "y_train", "y_test", "target_scaler"}
+    if has_validation:
+        required.update({"X_val", "y_val"})
+    if not required.issubset(value):
+        return False
+    suffixes = ["train", "test"] + (["val"] if has_validation else [])
+    if any(
+        len(value[f"X_{suffix}"]) == 0
+        or len(value[f"X_{suffix}"]) != len(value[f"y_{suffix}"])
+        or not np.isfinite(np.asarray(value[f"y_{suffix}"], dtype=float)).all()
+        for suffix in suffixes
+    ):
+        return False
+    scaler = value["target_scaler"]
+    if scaled:
+        return (
+            isinstance(scaler, MinMaxScaler)
+            and np.isfinite(scaler.data_min_).all()
+            and np.isfinite(scaler.data_max_).all()
+        )
+    return scaler is None
+
 
 class BaseSplitter(ABC):
     """Abstract base class for splitters."""
@@ -37,7 +131,7 @@ class BaseSplitter(ABC):
     """
 
     def __init__(self, name, data, wt_file, csv_has_header=False, use_cache=False,
-                 random_state=42, type='biomolecules',
+                 random_state=42, type='biomolecules', cache_identity=None,
                  **kwargs):
         """
         Args:
@@ -53,55 +147,77 @@ class BaseSplitter(ABC):
 
         self.wt_seq_lens = []
         self.wt_seqs = []
-        if isinstance(wt_file, str):
-            self.wt_seq_lens.append(len(str(SeqIO.read(wt_file, "fasta").seq)))
-            self.wt_seqs.append(str(SeqIO.read(wt_file, "fasta").seq))
-        elif isinstance(wt_file, list):
-            for file in wt_file:
-                self.wt_seq_lens.append(len(str(SeqIO.read(file, "fasta").seq)))
-                self.wt_seqs.append(str(SeqIO.read(file, "fasta").seq))
+        wt_paths = [wt_file] if isinstance(wt_file, str) else list(wt_file)
+        for file in wt_paths:
+            sequence = str(SeqIO.read(file, "fasta").seq)
+            self.wt_seq_lens.append(len(sequence))
+            self.wt_seqs.append(sequence)
         self.wt_seq = ''.join(self.wt_seqs)
         self.use_cache = use_cache
         self.random_state = random_state
+        self.cache_identity = cache_identity
 
         root_folder = get_output_root()
+        dataset_dir = os.path.join(root_folder, type, name)
 
-         # If the data is a CSV file
+        # If the data is a CSV file
         if isinstance(data, str) and data.endswith('.csv'):
             self.data = pd.read_csv(data, header=0 if csv_has_header else None)
-            # Rename columns for consistency
             self.data.rename(columns={self.data.columns[0]: 0, self.data.columns[1]: 1}, inplace=True)
             dataset_name = os.path.splitext(os.path.basename(data))[0]
-            dataset_file = os.path.join(root_folder, type, name, dataset_name + '.csv')
-        elif isinstance(data, pd.DataFrame):  # If the data is already a DataFrame
+        elif isinstance(data, pd.DataFrame):
             self.data = data.copy()
-            # Ensure column names are standardized
             self.data.rename(columns={self.data.columns[0]: 0, self.data.columns[1]: 1}, inplace=True)
             dataset_name = 'dataframe_input'
-            dataset_file = os.path.join(root_folder, type, name, dataset_name + '.csv')
         else:
             raise ValueError("Invalid data format: data must be a file path to a CSV or a DataFrame.")
 
-        # Define file attributes and split directory
+        input_dir = None
+        if self.cache_identity is not None:
+            evidence_identity = sha256_json({"cache_identity": str(self.cache_identity)})
+            input_dir = os.path.join(dataset_dir, "inputs", evidence_identity)
+            dataset_file = os.path.join(input_dir, dataset_name + '.csv')
+        else:
+            dataset_file = os.path.join(dataset_dir, dataset_name + '.csv')
+
         self.file_attrs = {
             'dataset_file': dataset_file,
             'dataset_name': dataset_name,
-            'dataset_dir': os.path.join(root_folder, type, name),
-            'split_dir': os.path.join(root_folder, type, name, 'split_cache', dataset_name)
+            'dataset_dir': dataset_dir,
+            'input_dir': input_dir,
+            'split_dir': os.path.join(dataset_dir, 'split_cache', dataset_name),
         }
 
-        # Create cache directory if needed
         if self.use_cache:
             os.makedirs(self.file_attrs['split_dir'], exist_ok=True)
 
-        # copy dataset file to new location
-        if not os.path.exists(self.file_attrs['dataset_file']):
-            os.makedirs(os.path.dirname(self.file_attrs['dataset_file']), exist_ok=True)
-            
-            if isinstance(data, str):  # data is a file path
-                shutil.copy(data, self.file_attrs['dataset_file'])
-            else:  # data is a DataFrame
-                data.to_csv(self.file_attrs['dataset_file'], index=False)
+        if not os.path.exists(dataset_file):
+            if isinstance(data, str):
+                _atomic_copy(data, dataset_file)
+            else:
+                _atomic_dataframe_csv(data, dataset_file)
+
+        if input_dir is not None:
+            wt_evidence = []
+            for index, source in enumerate(wt_paths, start=1):
+                suffix = os.path.splitext(source)[1] or ".fasta"
+                destination = os.path.join(input_dir, f"wt_{index}{suffix}")
+                if not os.path.exists(destination):
+                    _atomic_copy(source, destination)
+                wt_evidence.append(
+                    {"path": destination, "raw_sha256": sha256_file(destination)}
+                )
+            atomic_write_json(
+                os.path.join(input_dir, "input_manifest.json"),
+                {
+                    "cache_identity": str(self.cache_identity),
+                    "dataset": {
+                        "path": dataset_file,
+                        "raw_sha256": sha256_file(dataset_file),
+                    },
+                    "wt_fasta": wt_evidence,
+                },
+            )
         
 # Note: For new classes on top of ProteinSplitter, all unique args for split_data() should be used for generate split_type attribute for proper cache storage
 
@@ -151,7 +267,7 @@ class ProteinSplitter(BaseSplitter):
                          **kwargs)
         
         # Define base protein splitter path
-        if y_scaling == False:
+        if not y_scaling:
             self.y_scaling = "y_unscaled"
         else:
             self.y_scaling = "y_scaled"
@@ -159,15 +275,23 @@ class ProteinSplitter(BaseSplitter):
         self.val_split = val_split
         self.kfold_splits = False
 
-        self.file_attrs['base_splitter_path'] = os.path.join(self.file_attrs['split_dir'], "base_splitter" + '_' + self.y_scaling + ".pkl")
+        cache_suffix = (
+            f"_{str(self.cache_identity)[:16]}" if self.cache_identity is not None else ""
+        )
+        self.file_attrs['base_splitter_path'] = os.path.join(
+            self.file_attrs['split_dir'],
+            f"base_splitter_{self.y_scaling}{cache_suffix}_v{_SPLIT_SCHEMA_VERSION}.pkl",
+        )
 
-        # Load existing base protein splitter or create a new one
+        cached_data = None
         if self.use_cache and os.path.exists(self.file_attrs['base_splitter_path']):
-            self.data = pd.read_pickle(self.file_attrs['base_splitter_path'])
-            
-        # Create base protein splitter if not found and save is use_cache is True
+            candidate = _load_cached_pickle(self.file_attrs['base_splitter_path'])
+            if _valid_base_data(candidate):
+                cached_data = candidate
+
+        if cached_data is not None:
+            self.data = cached_data
         else:
-            
             if len(self.wt_seq_lens) > 1:
                 # check MutationFormat of column 0
                 if MutationFormat(self.data[0].iloc[0].split(':')[0], self.wt_seq).format == 'Mutation String':
@@ -185,14 +309,12 @@ class ProteinSplitter(BaseSplitter):
             self.data['muts'] = self.data[0].apply(lambda x: MutationFormat(x, self.wt_seq).to_mutation_string())
             self.data['mut_load'] = self.data['mut_positions'].apply(lambda x: len(x))
 
-            if y_scaling == True:
-                scaler = MinMaxScaler()
-                scaled_data = scaler.fit_transform(np.array(self.data[1]).reshape(-1, 1))
-                self.data[1] = scaled_data
+            # Target scaling is fit separately on each fold's training labels in
+            # _save_splits() to avoid leaking held-out label ranges.
 
             # save as pickle file
             if self.use_cache:
-                self.data.to_pickle(self.file_attrs['base_splitter_path'])
+                _atomic_pickle(self.data, self.file_attrs['base_splitter_path'])
 
     def _shift_mutation_position(self, inputs, lengths, type):
         # inputs is a list of mutation strings or mutation lists
@@ -247,52 +369,99 @@ class ProteinSplitter(BaseSplitter):
 
         # 0 for train, 1 for test, 2 for val
 
+        split_identity = f"seed{self.random_state}"
+        if hasattr(self, "fold_count"):
+            split_identity += f"_folds{self.fold_count}"
+        if self.cache_identity is not None:
+            split_identity += f"_identity{str(self.cache_identity)[:16]}"
+
         if self.val_split is not None:
 
-            if self.kfold_splits == True:
+            if self.kfold_splits:
                 pass
             else:
                 # Separate train set into train and val sets
                 rows_with_marker_0 = self.data[self.data['group'] == 0]
                 num_to_sample = int(len(rows_with_marker_0) * self.val_split)
-                sampled_indices = rows_with_marker_0.sample(n=num_to_sample).index
+                if num_to_sample < 1:
+                    raise ValueError(
+                        "validation split is empty; increase the dataset size or val_split"
+                    )
+                validation_seed = (
+                    None
+                    if self.random_state is None
+                    else stable_seed(
+                        self.random_state,
+                        "validation",
+                        self.split_type,
+                        -1 if iter is None else iter,
+                    )
+                )
+                sampled_indices = rows_with_marker_0.sample(
+                    n=num_to_sample,
+                    random_state=validation_seed,
+                ).index
                 self.data.loc[sampled_indices, 'group'] = 2
 
             X_train = self.data[self.data['group'] == 0][0].values
             X_val = self.data[self.data['group'] == 2][0].values
             X_test = self.data[self.data['group'] == 1][0].values
-            y_train = self.data[self.data['group'] == 0][1].values
-            y_val = self.data[self.data['group'] == 2][1].values
-            y_test = self.data[self.data['group'] == 1][1].values
+            y_train = self.data[self.data['group'] == 0][1].to_numpy(dtype=float)
+            y_val = self.data[self.data['group'] == 2][1].to_numpy(dtype=float)
+            y_test = self.data[self.data['group'] == 1][1].to_numpy(dtype=float)
+
+            if not len(X_train) or not len(X_val) or not len(X_test):
+                raise ValueError("every fold must contain non-empty train, validation, and test sets")
+
+            target_scaler = None
+            if self.y_scaling == "y_scaled":
+                target_scaler = MinMaxScaler()
+                y_train = target_scaler.fit_transform(y_train.reshape(-1, 1)).ravel()
+                y_val = target_scaler.transform(y_val.reshape(-1, 1)).ravel()
+                y_test = target_scaler.transform(y_test.reshape(-1, 1)).ravel()
 
             train_size = len(X_train) / len(self.data)
             val_size = len(X_val) / len(self.data)
 
-            # return splits
-            # initialize dictionary to store splits
-            self.splits = {'X_train': X_train, 'X_val': X_val, 'X_test': X_test, 'y_train': y_train, 'y_val': y_val, 'y_test': y_test}
+            self.splits = {
+                'X_train': X_train,
+                'X_val': X_val,
+                'X_test': X_test,
+                'y_train': y_train,
+                'y_val': y_val,
+                'y_test': y_test,
+                'target_scaler': target_scaler,
+            }
 
-
-            # check if iter is none:
             if iter is None:
-                split_name = f'split_by_{self.split_type}_{int(train_size*100)}-{int(val_size*100)}-{int(test_size*100)}-{self.y_scaling}'
+                split_name = f'split_by_{self.split_type}_{int(train_size*100)}-{int(val_size*100)}-{int(test_size*100)}-{self.y_scaling}_{split_identity}_v{_SPLIT_SCHEMA_VERSION}'
             else:
-                split_name = f'split_by_{self.split_type}_{int(train_size*100)}-{int(val_size*100)}-{int(test_size*100)}-{self.y_scaling}_iter{iter}'
+                split_name = f'split_by_{self.split_type}_{int(train_size*100)}-{int(val_size*100)}-{int(test_size*100)}-{self.y_scaling}_iter{iter}_{split_identity}_v{_SPLIT_SCHEMA_VERSION}'
             
         else:
             X_train = self.data[self.data['group'] == 0][0].values
             X_test = self.data[self.data['group'] == 1][0].values
-            y_train = self.data[self.data['group'] == 0][1].values
-            y_test = self.data[self.data['group'] == 1][1].values
+            y_train = self.data[self.data['group'] == 0][1].to_numpy(dtype=float)
+            y_test = self.data[self.data['group'] == 1][1].to_numpy(dtype=float)
 
-            # initialize dictionary to store splits
-            self.splits = {'X_train': X_train, 'X_test': X_test, 'y_train': y_train, 'y_test': y_test}
-            
-            # check if iter is none:
+            target_scaler = None
+            if self.y_scaling == "y_scaled":
+                target_scaler = MinMaxScaler()
+                y_train = target_scaler.fit_transform(y_train.reshape(-1, 1)).ravel()
+                y_test = target_scaler.transform(y_test.reshape(-1, 1)).ravel()
+
+            self.splits = {
+                'X_train': X_train,
+                'X_test': X_test,
+                'y_train': y_train,
+                'y_test': y_test,
+                'target_scaler': target_scaler,
+            }
+
             if iter is None:
-                split_name = f'split_by_{self.split_type}_{int((1-test_size)*100)}-{int(test_size*100)}-{self.y_scaling}'
+                split_name = f'split_by_{self.split_type}_{int((1-test_size)*100)}-{int(test_size*100)}-{self.y_scaling}_{split_identity}_v{_SPLIT_SCHEMA_VERSION}'
             else:
-                split_name = f'split_by_{self.split_type}_{int((1-test_size)*100)}-{int(test_size*100)}-{self.y_scaling}_iter{iter}'
+                split_name = f'split_by_{self.split_type}_{int((1-test_size)*100)}-{int(test_size*100)}-{self.y_scaling}_iter{iter}_{split_identity}_v{_SPLIT_SCHEMA_VERSION}'
 
         # Save split or load split if it already exists to prevent overwriting
         self.splits['split_name'] = split_name
@@ -300,15 +469,22 @@ class ProteinSplitter(BaseSplitter):
         file_name = os.path.join(self.file_attrs['split_dir'], split_name + ".pkl")
 
         if self.use_cache:
-            if not os.path.exists(file_name):
-                with open(file_name, 'wb') as file:
-                    print("Split saved.")
-                    pickle.dump(self.splits, file)
-            
+            cached_split = (
+                _load_cached_pickle(file_name)
+                if os.path.exists(file_name)
+                else None
+            )
+            if _valid_split(
+                cached_split,
+                split_name=split_name,
+                has_validation=self.val_split is not None,
+                scaled=self.y_scaling == "y_scaled",
+            ):
+                print("Split already exists. Loading validated pre-existing split.")
+                self.splits = cached_split
             else:
-                with open(file_name, 'rb') as file:
-                    print("Split already exists. Generated splits not saved. Loading pre-existing split.")
-                    self.splits = pickle.load(file)
+                print("Split saved.")
+                _atomic_pickle(self.splits, file_name)
 
     def _assign_folds(self, k_folds):
         """
@@ -318,8 +494,7 @@ class ProteinSplitter(BaseSplitter):
         - k_folds (int): Number of folds.
         """
 
-        if self.random_state is not None:
-            np.random.seed(self.random_state)
+        rng = np.random.default_rng(self.random_state)
 
         # initialize fold columns
         self.data['fold'] = None
@@ -328,7 +503,7 @@ class ProteinSplitter(BaseSplitter):
         train_indices = self.data[self.data['group'] == 0].index
 
         # Shuffle the indices
-        shuffled_indices = np.random.permutation(train_indices)
+        shuffled_indices = rng.permutation(train_indices)
 
         # Determine the number of points per fold
         fold_sizes = [len(shuffled_indices) // k_folds] * k_folds
@@ -336,7 +511,6 @@ class ProteinSplitter(BaseSplitter):
             fold_sizes[i] += 1
 
         # Assign fold labels
-        groups = np.zeros(len(self.data), dtype=int)
         current_idx = 0
         for fold_idx, fold_size in enumerate(fold_sizes):
             for i in range(current_idx, current_idx + fold_size):
@@ -413,11 +587,10 @@ class KFoldProteinSplitter(ProteinSplitter):
         - n_splits (int): Number of folds.
         """
     
-        if self.random_state is not None:
-            np.random.seed(self.random_state)
-        
-        # Shuffle the DataFrame indices
-        shuffled_indices = np.random.permutation(self.data.index)
+        rng = np.random.default_rng(self.random_state)
+
+        # Shuffle the DataFrame indices without mutating NumPy's global RNG.
+        shuffled_indices = rng.permutation(self.data.index)
         
         # Determine the number of points per fold
         fold_sizes = [len(shuffled_indices) // n_splits] * n_splits
@@ -425,15 +598,15 @@ class KFoldProteinSplitter(ProteinSplitter):
             fold_sizes[i] += 1
         
         # Assign fold labels
-        groups = np.zeros(len(self.data), dtype=int)
+        groups = pd.Series(index=self.data.index, dtype=int)
         current_idx = 0
         for fold_idx, fold_size in enumerate(fold_sizes):
-            for i in range(current_idx, current_idx + fold_size):
-                groups[shuffled_indices[i]] = fold_idx
+            fold_indices = shuffled_indices[current_idx:current_idx + fold_size]
+            groups.loc[fold_indices] = fold_idx
             current_idx += fold_size
-        
+
         # Add 'group' column to the DataFrame
-        self.data['fold'] = groups
+        self.data['fold'] = groups.astype(int)
 
     def _split_data(self, fold_number):
         """
@@ -452,17 +625,20 @@ class KFoldProteinSplitter(ProteinSplitter):
         self._save_splits()
 
     def generate_splits(self, n_splits):
-      
-      self._assign_folds(n_splits=n_splits)
+        if n_splits < 2:
+            raise ValueError("at least 2 folds are required")
+        if n_splits > len(self.data):
+            raise ValueError("fold count cannot exceed the number of dataset rows")
 
-      splits = []
-      for fold_num in range(n_splits):
-          self._split_data(fold_number=fold_num)
-          # Create a deep copy of self and add it to splits
-          split_copy = copy.deepcopy(self)
-          splits.append(split_copy)
-      
-      return splits
+        self.fold_count = n_splits
+        self._assign_folds(n_splits=n_splits)
+
+        splits = []
+        for fold_num in range(n_splits):
+            self._split_data(fold_number=fold_num)
+            splits.append(copy.deepcopy(self))
+
+        return splits
 
 class RoundProteinSplitter(ProteinSplitter):
     """
