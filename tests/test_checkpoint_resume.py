@@ -6,16 +6,22 @@ import unittest
 from pathlib import Path
 
 from multievolve.cli.propose import _compatible_training_manifest, _load_model_checkpoint
+from multievolve.predictors.neural_net_regressors import run_nn_model_experiments
 from multievolve.utils.local_sweep import (
     ARTIFACT_SCHEMA_VERSION,
     initialize_manifest,
     jobs_dir,
+    load_manifest,
+    load_sweep_results,
+    manifest_path,
+    results_path,
     run_local_sweep,
 )
 from multievolve.utils.reproducibility import (
     atomic_write_json,
     canonical_csv_sha256,
     canonical_fasta_sha256,
+    sha256_json,
 )
 
 
@@ -85,24 +91,39 @@ class CheckpointResumeTests(unittest.TestCase):
         artifact = root / "model.pth"
         artifact.write_bytes(b"model-state")
         checkpoint_path = root / "checkpoint.json"
+        contract = {"schema_version": ARTIFACT_SCHEMA_VERSION, "fold_index": 0}
+        job_id = sha256_json(contract)
         atomic_write_json(
             checkpoint_path,
             {
                 "schema_version": ARTIFACT_SCHEMA_VERSION,
-                "job_id": "job",
+                "job_id": job_id,
+                "job_contract": contract,
                 "model_artifact": {
                     "path": str(artifact),
                     "sha256": hashlib.sha256(b"model-state").hexdigest(),
                 },
             },
         )
-        self.assertIsNotNone(_load_model_checkpoint(checkpoint_path, "job"))
+        self.assertIsNotNone(
+            _load_model_checkpoint(checkpoint_path, job_id, expected_contract=contract)
+        )
         artifact.write_bytes(b"corrupt")
-        self.assertIsNone(_load_model_checkpoint(checkpoint_path, "job"))
+        self.assertIsNone(
+            _load_model_checkpoint(checkpoint_path, job_id, expected_contract=contract)
+        )
 
     def test_manifest_rejects_path_traversal(self):
         with self.assertRaisesRegex(ValueError, "single non-empty path component"):
             initialize_manifest("..", {"run_identity": "unsafe"})
+
+    def test_manifest_rejects_stale_schema(self):
+        atomic_write_json(
+            manifest_path("stale"),
+            {"schema_version": ARTIFACT_SCHEMA_VERSION - 1, "run_identity": "old"},
+        )
+        with self.assertRaisesRegex(ValueError, "incompatible training manifest schema"):
+            load_manifest("stale")
 
     def test_manifest_rejects_reusing_experiment_for_another_identity(self):
         manifest = {
@@ -119,6 +140,20 @@ class CheckpointResumeTests(unittest.TestCase):
                     "run_identity": "second",
                 },
             )
+
+    def test_manifest_resume_preserves_completion_metadata(self):
+        complete = {
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "run_identity": "same",
+            "completion": {"job_ids": ["job"], "job_count": 1},
+        }
+        initialize_manifest("preserve", complete)
+        observed = initialize_manifest(
+            "preserve",
+            {"schema_version": ARTIFACT_SCHEMA_VERSION, "run_identity": "same"},
+        )
+        self.assertEqual(observed["completion"], complete["completion"])
+        self.assertEqual(load_manifest("preserve")["completion"], complete["completion"])
 
     def test_sweep_reuses_jobs_and_recovers_only_a_missing_job(self):
         Fcn.runs = 0
@@ -142,10 +177,68 @@ class CheckpointResumeTests(unittest.TestCase):
         self.assertEqual(Fcn.runs, 2)
         self.assertEqual(first.to_csv(index=False), second.to_csv(index=False))
 
-        next(jobs_dir("resume").glob("*.json")).unlink()
+        job_path = next(jobs_dir("resume").glob("*.json"))
+        job_path.unlink()
         third = run_local_sweep(**arguments)
         self.assertEqual(Fcn.runs, 3)
         self.assertEqual(first.to_csv(index=False), third.to_csv(index=False))
+
+        job_path = next(jobs_dir("resume").glob("*.json"))
+        corrupted = json.loads(job_path.read_text())
+        corrupted["result"] = {}
+        corrupted["result_sha256"] = sha256_json({})
+        job_path.write_text(json.dumps(corrupted))
+        fourth = run_local_sweep(**arguments)
+        self.assertEqual(Fcn.runs, 4)
+        self.assertEqual(first.to_csv(index=False), fourth.to_csv(index=False))
+
+    def test_results_table_is_reconstructed_from_valid_jobs(self):
+        Fcn.runs = 0
+        results = run_local_sweep(
+            splits=[_Split("fold-0"), _Split("fold-1")],
+            features=[_Feature()],
+            models=[Fcn],
+            experiment_name="reconstruct",
+            sweep_depth="test",
+            search_method="test",
+            show_plots=False,
+            seed=42,
+            deterministic=True,
+            device="cpu",
+            run_identity=None,
+        )
+        original = results.to_csv(index=False)
+        results_path("reconstruct").write_text("tampered\n")
+        rebuilt = load_sweep_results("reconstruct")
+        self.assertEqual(original, rebuilt.to_csv(index=False))
+
+    def test_public_sweep_api_derives_identity_when_omitted(self):
+        Fcn.runs = 0
+        arguments = {
+            "splits": [_Split("fold-0")],
+            "features": [_Feature()],
+            "models": [Fcn],
+            "experiment_name": "automatic",
+            "sweep_depth": "test",
+            "search_method": "test",
+            "show_plots": False,
+            "seed": 42,
+            "deterministic": True,
+            "device": "cpu",
+        }
+        first = run_nn_model_experiments(**arguments)
+        second = run_nn_model_experiments(**arguments)
+        self.assertEqual(Fcn.runs, 1)
+        self.assertEqual(first.to_csv(index=False), second.to_csv(index=False))
+
+        changed = dict(arguments)
+        changed["experiment_name"] = "automatic-changed"
+        changed["splits"] = [_Split("fold-changed")]
+        run_nn_model_experiments(**changed)
+        self.assertNotEqual(
+            load_manifest("automatic")["run_identity"],
+            load_manifest("automatic-changed")["run_identity"],
+        )
 
     def test_step_two_rejects_scientifically_different_inputs(self):
         runtime = {"torch": "1", "cuda": None, "source": {"revision": "abc"}}

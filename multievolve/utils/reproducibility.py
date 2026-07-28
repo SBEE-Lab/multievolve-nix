@@ -88,6 +88,48 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_array(values: Any) -> str:
+    """Hash an array's shape, dtype, and values deterministically."""
+    array = np.asarray(values)
+    metadata = {"dtype": str(array.dtype), "shape": list(array.shape)}
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    if array.dtype.hasobject:
+        digest.update(
+            json.dumps(
+                array.tolist(),
+                sort_keys=True,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    else:
+        digest.update(np.ascontiguousarray(array).tobytes())
+    return digest.hexdigest()
+
+
+def source_tree_sha256(root: str | Path) -> str:
+    """Hash installed MULTI-evolve Python and sweep-configuration sources."""
+    root = Path(root)
+    paths = sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix in {".py", ".yaml", ".yml"}
+    )
+    digest = hashlib.sha256()
+    for path in paths:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(sha256_file(path).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def canonical_csv_sha256(path: str | Path, *, header: bool = True) -> str:
     """Hash parsed CSV content while ignoring byte-level formatting differences."""
     import pandas as pd
@@ -168,11 +210,13 @@ def source_identity() -> dict[str, Any]:
             "location": None,
         }
     except (OSError, subprocess.CalledProcessError):
+        package_root = Path(__file__).resolve().parents[1]
         return {
             "revision": None,
             "dirty": None,
             "dirty_sha256": None,
             "location": str(root),
+            "content_sha256": source_tree_sha256(package_root),
         }
 
 

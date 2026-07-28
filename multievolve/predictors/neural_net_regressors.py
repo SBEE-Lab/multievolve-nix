@@ -37,8 +37,13 @@ def run_nn_model_experiments(splits,
         use_cache (bool, optional): Whether to cache results. Defaults to False.
         sweep_depth (str, optional): Sweep type - 'standard', 'custom', 'test'. Defaults to 'standard'.
         search_method (str, optional): Search method - 'grid', 'bayes', 'test'. Defaults to 'grid'.
-        count (int, optional): Kept for API compatibility; only used by the old W&B bayes backend.
+        count (int, optional): Kept for API compatibility; ignored by the static backend.
         show_plots (bool, optional): Whether to show matplotlib plots. Defaults to True.
+        seed (int, optional): Base model seed. Defaults to 42.
+        deterministic (bool, optional): Request deterministic PyTorch algorithms.
+        device (str, optional): ``auto``, ``cpu``, or required ``cuda``.
+        run_identity (str, optional): Explicit training-run identity. When omitted,
+            the backend derives one from split content, the grid, runtime, and source.
 
     Returns:
         pandas.DataFrame: Rows written to sweep_results/<experiment_name>/results.csv

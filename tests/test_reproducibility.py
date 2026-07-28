@@ -14,7 +14,12 @@ from multievolve.predictors.neural_net_regressors import BaseNN, Fcn
 from multievolve.splitters.base_splitters import KFoldProteinSplitter
 from multievolve.utils.other_utils import performance_report
 from multievolve.utils.data_utils import TorchDataProcessor
-from multievolve.utils.reproducibility import resolve_device, stable_seed
+from multievolve.utils.reproducibility import (
+    resolve_device,
+    sha256_array,
+    source_tree_sha256,
+    stable_seed,
+)
 
 
 class _NumericFeaturizer:
@@ -57,6 +62,17 @@ class ReproducibilityTests(unittest.TestCase):
         self.assertGreaterEqual(expected, 0)
         self.assertLess(expected, 2**32)
         self.assertNotEqual(expected, stable_seed(42, "train", 3, "condition"))
+
+    def test_array_and_installed_source_hashes_are_content_addressed(self):
+        self.assertEqual(sha256_array([1.0, 2.0]), sha256_array([1.0, 2.0]))
+        self.assertNotEqual(sha256_array([1.0, 2.0]), sha256_array([1.0, 3.0]))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "module.py"
+            source.write_text("VALUE = 1\n")
+            first = source_tree_sha256(root)
+            source.write_text("VALUE = 2\n")
+            self.assertNotEqual(first, source_tree_sha256(root))
 
     def test_seeded_train_loader_order_is_reproducible(self):
         def order(seed):

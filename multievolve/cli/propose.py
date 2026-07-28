@@ -108,16 +108,20 @@ def _load_mutation_pool(path, wt_seq):
     return mutations
 
 
-def _load_model_checkpoint(path, job_id):
+def _load_model_checkpoint(path, job_id, expected_contract=None):
     try:
         with path.open(encoding='utf-8') as handle:
             checkpoint = json.load(handle)
     except (OSError, json.JSONDecodeError):
         return None
     artifact = checkpoint.get('model_artifact')
+    contract = checkpoint.get('job_contract')
     if (
         checkpoint.get('schema_version') != ARTIFACT_SCHEMA_VERSION
         or checkpoint.get('job_id') != job_id
+        or not isinstance(contract, dict)
+        or sha256_json(contract) != job_id
+        or (expected_contract is not None and contract != expected_contract)
         or not isinstance(artifact, dict)
     ):
         return None
@@ -384,7 +388,11 @@ def main():
         job_id = sha256_json(job_contract)
         model_job_ids.append(job_id)
         checkpoint_path = checkpoint_root / f'{job_id}.json'
-        checkpoint = _load_model_checkpoint(checkpoint_path, job_id)
+        checkpoint = _load_model_checkpoint(
+            checkpoint_path,
+            job_id,
+            expected_contract=job_contract,
+        )
 
         seed_everything(model_seed, deterministic=args.deterministic)
         model_config = {
@@ -402,8 +410,9 @@ def main():
             atomic_write_json(
                 checkpoint_path,
                 {
-                    **job_contract,
+                    'schema_version': ARTIFACT_SCHEMA_VERSION,
                     'job_id': job_id,
+                    'job_contract': job_contract,
                     'model_artifact': {
                         'path': str(Path(model.model_path).resolve()),
                         'sha256': sha256_file(model.model_path),

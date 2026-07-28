@@ -15,6 +15,7 @@ from multievolve.splitters import KFoldProteinSplitter  # noqa: E402
 from multievolve.utils.local_sweep import (  # noqa: E402
     ARTIFACT_SCHEMA_VERSION,
     initialize_manifest,
+    sweep_completion,
     update_manifest,
 )
 from multievolve.utils.reproducibility import (  # noqa: E402
@@ -174,6 +175,10 @@ def main():
             ]
             .drop_duplicates()
             .to_dict(orient="records")
+        )
+        manifest["completion"] = sweep_completion(
+            sweep_results,
+            args.experiment_name,
         )
         update_manifest(args.experiment_name, manifest)
     except Exception as exc:
