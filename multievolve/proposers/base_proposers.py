@@ -2,9 +2,8 @@ import copy
 import os
 from joblib import Parallel, delayed
 import random
-from typing import List, Tuple
+from typing import Literal, overload
 
-from Bio import SeqIO
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -13,7 +12,12 @@ import seaborn as sns
 from itertools import combinations, product
 
 from multievolve.predictors import BaseRegressor, GPRegressor
-from multievolve.utils.data_utils import MutationFormat, MutationListFormats, levenshtein_distance_matrix
+from multievolve.utils.data_utils import (
+    MutationFormat,
+    MutationListFormats,
+    levenshtein_distance_matrix,
+    validate_single_substitution,
+)
 from multievolve.utils.other_utils import deep_mutational_scan, wt_only_mutational_pool_to_dict, mutational_pool_to_dict, mut_pool_searcher
 
 # Definitions:
@@ -321,85 +325,118 @@ class RandomMutagenesisProposer(BaseProposer):
 
 
 class CombinatorialProposer(BaseProposer):
+    """Generate variants from position-aware combinations of a mutation pool.
+
+    ``trust_radius`` remains a backwards-compatible alias for
+    ``max_mutations``. New callers should pass an explicit inclusive
+    ``min_mutations``/``max_mutations`` range.
     """
-    Proposer that generates combinatorial proposals by combining mutations.
 
-    Attributes:
-        start_seq (str): The starting protein sequence.
-        models (list): List of models for evaluating proposed mutants.
-        trust_radius (int): Maximum number of mutations allowed in a variant.
-        num_seeds (int): Maximum number of sequences or evolutionary trajectories allowed, -1 for all combinations.
-        mutation_pool (list): List of possible mutations to propose from.
-        experiment_name (str): Name of the experiment run.
-        proposals (pd.DataFrame): DataFrame to store proposed mutations.
+    def __init__(
+        self,
+        start_seq,
+        models=None,
+        trust_radius=None,
+        num_seeds=None,
+        mutation_pool=None,
+        experiment_name="base_proposer_run",
+        *,
+        min_mutations=2,
+        max_mutations=None,
+    ):
+        if max_mutations is None:
+            if trust_radius is None:
+                raise ValueError("max_mutations or trust_radius is required")
+            max_mutations = trust_radius
+        elif trust_radius is not None and trust_radius != max_mutations:
+            raise ValueError("trust_radius and max_mutations must match when both are provided")
 
-    Example Usage:
+        if min_mutations < 2:
+            raise ValueError("min_mutations must be at least 2")
+        if max_mutations < min_mutations:
+            raise ValueError("max_mutations must be greater than or equal to min_mutations")
 
-        # Initialize proposer with sequence and parameters
-        # Ignore: experiment_name
-        proposer = CombinatorialProposer(
-            start_seq="MKTSTGNFKIVILMGVNRRMKTSTGNFKI",
-            models=[model1, model2],  # List of trained models
-            trust_radius=2,  # Maximum 2 mutations per variant
-            num_seeds=-1,  # -1 for all combinations.
-            mutation_pool=["A1G", "D2E", "K3R"],  # Allowed mutations
+        if mutation_pool is not None:
+            mutation_pool = [
+                validate_single_substitution(mutation, start_seq)[0]
+                for mutation in mutation_pool
+            ]
+
+        super().__init__(
+            start_seq=start_seq,
+            models=models,
+            trust_radius=max_mutations,
+            num_seeds=num_seeds,
+            mutation_pool=mutation_pool,
+            experiment_name=experiment_name,
         )
+        self.min_mutations = min_mutations
+        self.max_mutations = max_mutations
+        self._mutations_by_position = self._group_mutations_by_position()
 
-        # Generate and get proposals
-        proposer.propose()
+        if self.max_mutations > len(self._mutations_by_position):
+            raise ValueError(
+                f"max_mutations ({self.max_mutations}) exceeds the number of distinct "
+                f"mutation positions ({len(self._mutations_by_position)})"
+            )
 
-        # Predict activity of proposed mutants
-        proposer.evaluate_proposals()
-
-        # Save proposals to file
-        proposer.save_proposals("combinatorial_proposals")
-    """
-
-    def propose(self, output_df=True) -> pd.DataFrame:
-        """
-        Generate combinatorial proposals by combining mutations.
-
-        Returns:
-            pd.DataFrame: DataFrame of combinatorial proposals, including the number of mutations for each proposal.
-        """
-
-        # Function to generate all possible combinations of mutations
-        def generate_permutations(mutations, num_positions):
-            positions = list(mutations.keys())
-            all_combinations_ls = []
-            
-            # Get all combinations of the given number of positions
-            for combo in combinations(positions, num_positions):
-                # Generate all permutations for the selected combination of positions
-                perms_ls = [permutation for permutation in product(*(mutations[pos] for pos in combo))]
-                all_combinations_ls.extend(perms_ls)
-
-            return all_combinations_ls
-
-        # Initialize an empty dictionary to store the mutations
-        mutations_dict = {}
-
-        # Iterate over the list and populate the dictionary
+    def _group_mutations_by_position(self):
+        mutations_by_position = {}
         for mutation in self.mutation_pool:
-            # Extract the position and mutation from the string
-            position = int(''.join(filter(str.isdigit, mutation)))
-            
-            # If the position is not in the dictionary, add it with an empty list
-            if position not in mutations_dict:
-                mutations_dict[position] = []
-            
-            # Append the mutation to the list at the current position
-            mutations_dict[position].append(mutation)
+            canonical, _, position, _ = validate_single_substitution(
+                mutation,
+                self.start_seq,
+            )
+            alternatives = mutations_by_position.setdefault(position, [])
+            if canonical not in alternatives:
+                alternatives.append(canonical)
+        return mutations_by_position
 
+    @property
+    def distinct_positions(self) -> int:
+        return len(self._mutations_by_position)
+
+    def candidate_counts(self):
+        """Return exact candidate counts for every requested mutational load."""
+        counts = [0] * (self.max_mutations + 1)
+        counts[0] = 1
+        for mutations in self._mutations_by_position.values():
+            alternatives = len(mutations)
+            for load in range(self.max_mutations, 0, -1):
+                counts[load] += counts[load - 1] * alternatives
+        return {
+            load: counts[load]
+            for load in range(self.min_mutations, self.max_mutations + 1)
+        }
+
+    def _combinations_for_load(self, load):
+        positions = list(self._mutations_by_position)
+        for position_set in combinations(positions, load):
+            yield from product(*(self._mutations_by_position[position] for position in position_set))
+
+    @overload
+    def propose(self, output_df: Literal[True] = True) -> pd.DataFrame: ...
+
+    @overload
+    def propose(self, output_df: Literal[False]) -> None: ...
+
+    def propose(self, output_df=True) -> pd.DataFrame | None:
+        """Generate only the requested inclusive range of mutation loads."""
         muts = []
-        if self.num_seeds == -1:
-            # Create combinations for all sizes from 2 up to trust_radius
-            for r in range(2, self.trust_radius + 1):
-                muts.extend(generate_permutations(mutations_dict, r))
-        else:
-            # Randomly sample num_seeds combinations for each size from 2 up to trust_radius
-            for r in range(2, self.trust_radius + 1):
-                muts.extend(random.sample(generate_permutations(mutations_dict, r), self.num_seeds))
+        for load in range(self.min_mutations, self.max_mutations + 1):
+            if self.num_seeds == -1:
+                muts.extend(self._combinations_for_load(load))
+                continue
+
+            if self.num_seeds is None or self.num_seeds < 1:
+                raise ValueError("num_seeds must be -1 or a positive integer")
+            candidates = list(self._combinations_for_load(load))
+            if self.num_seeds > len(candidates):
+                raise ValueError(
+                    f"num_seeds ({self.num_seeds}) exceeds the {len(candidates)} "
+                    f"available candidates at mutational load {load}"
+                )
+            muts.extend(random.sample(candidates, self.num_seeds))
 
         self.proposals = self.proposal_list_to_dataframe(muts)
         self.proposals['num_muts'] = [len(mut) for mut in muts]

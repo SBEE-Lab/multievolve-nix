@@ -13,23 +13,75 @@ p2_propose.py \
 --wt-files apex.fasta \
 --training-dataset example_dataset.csv \
 --mutation-pool combo_muts.csv \
+--min-mutations 3 \
+--max-mutations 7 \
 --top-muts-per-load 3 \
+--max-candidates 100000 \
 --export-name multievolve_proposals
 """
 
 import argparse
 import os
-import pandas as pd
-import numpy as np
-from Bio import SeqIO
+
 import matplotlib
+
 matplotlib.use('Agg')
 
-from multievolve.splitters import *
-from multievolve.featurizers import *
-from multievolve.predictors import *
-from multievolve.proposers import *
-from multievolve.utils.local_sweep import load_sweep_results
+import pandas as pd  # noqa: E402
+from Bio import SeqIO  # noqa: E402
+
+from multievolve.featurizers import OneHotFeaturizer  # noqa: E402
+from multievolve.predictors import Fcn  # noqa: E402
+from multievolve.proposers import CombinatorialProposer  # noqa: E402
+from multievolve.splitters import KFoldProteinSplitter  # noqa: E402
+from multievolve.utils.data_utils import validate_single_substitution  # noqa: E402
+from multievolve.utils.local_sweep import load_sweep_results  # noqa: E402
+
+
+def _positive_int(value):
+    value = int(value)
+    if value < 1:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return value
+
+
+def _mutation_load(value):
+    value = int(value)
+    if value < 2:
+        raise argparse.ArgumentTypeError('must be at least 2')
+    return value
+
+
+def _load_mutation_pool(path, wt_seq):
+    pool_df = pd.read_csv(
+        path,
+        header=None,
+        dtype=str,
+        keep_default_na=False,
+        skip_blank_lines=False,
+    )
+    if pool_df.shape[1] != 1:
+        raise ValueError('mutation pool must be a one-column, no-header CSV')
+
+    mutations = []
+    seen = set()
+    for row_number, raw_mutation in enumerate(pool_df.iloc[:, 0], start=1):
+        try:
+            mutation, _, _, _ = validate_single_substitution(raw_mutation, wt_seq)
+        except ValueError as exc:
+            raise ValueError(
+                f'invalid single mutation on pool row {row_number}: {raw_mutation!r}: {exc}'
+            ) from exc
+
+        if mutation in seen:
+            raise ValueError(f'duplicate mutation on pool row {row_number}: {mutation}')
+
+        seen.add(mutation)
+        mutations.append(mutation)
+
+    if not mutations:
+        raise ValueError('mutation pool is empty')
+    return mutations
 
 
 def parse_args():
@@ -62,9 +114,27 @@ def parse_args():
     )
     parser.add_argument(
         '--top-muts-per-load',
-        type=int,
+        type=_positive_int,
         default=3,
         help='Number of top mutations to select per load (default: 3)'
+    )
+    parser.add_argument(
+        '--min-mutations',
+        type=_mutation_load,
+        default=3,
+        help='Minimum number of substitutions per proposed variant (default: 3)'
+    )
+    parser.add_argument(
+        '--max-mutations',
+        type=_mutation_load,
+        default=10,
+        help='Maximum number of substitutions per proposed variant (default: 10)'
+    )
+    parser.add_argument(
+        '--max-candidates',
+        type=_positive_int,
+        default=100000,
+        help='Fail before training if the requested search exceeds this many candidates (default: 100000)'
     )
     parser.add_argument(
         '--export-name',
@@ -90,77 +160,85 @@ def main():
     training_dataset_fname = args.training_dataset
     mutation_pool_fname = args.mutation_pool
     top_muts_per_load = args.top_muts_per_load
+    min_mutations = args.min_mutations
+    max_mutations = args.max_mutations
+    max_candidates = args.max_candidates
     export_name = args.export_name
 
-    # Processed variables
-    mutation_pool = pd.read_csv(mutation_pool_fname, header=None).values.flatten().tolist()
+    # Validate the search before loading sweep results or training final models.
+    if min_mutations > max_mutations:
+        raise SystemExit('error: --min-mutations must be less than or equal to --max-mutations')
     wt_seq = "".join([str(SeqIO.read(wt_file, "fasta").seq.upper()) for wt_file in wt_files])
+    try:
+        mutation_pool = _load_mutation_pool(mutation_pool_fname, wt_seq)
+        proposer = CombinatorialProposer(
+            start_seq=wt_seq,
+            models=None,
+            min_mutations=min_mutations,
+            max_mutations=max_mutations,
+            num_seeds=-1,
+            mutation_pool=mutation_pool,
+        )
+    except ValueError as exc:
+        raise SystemExit(f'error: {exc}') from exc
 
-    # Sweep results recorded locally by training (replaces wandb.Api().runs()).
+    candidate_counts = proposer.candidate_counts()
+    total_candidates = sum(candidate_counts.values())
+    print(f'Mutation-pool entries: {len(mutation_pool)}')
+    print(f'Distinct mutation positions: {proposer.distinct_positions}')
+    print(f'Requested mutational loads: {min_mutations}-{max_mutations}')
+    for load, count in candidate_counts.items():
+        print(f'  load {load}: {count} candidates')
+    print(f'Total candidates: {total_candidates}')
+    if total_candidates > max_candidates:
+        raise SystemExit(
+            f'error: requested search has {total_candidates} candidates, exceeding '
+            f'--max-candidates {max_candidates}'
+        )
+
     df = load_sweep_results(experiment_name)
-
-    ## create condition column to average runs with the same nn architecture across folds later on
     df['condition'] = (
-                        df['batch_size'].astype(str) + '|'
-                    + df['learning_rate'].astype(str) + '|'
-                    + df['layer_size'].astype(str) + '|'
-                    + df['num_layers'].astype(str) + '|'
-                    + df['Feature'].astype(str)
-                    )
+        df['batch_size'].astype(str)
+        + '|'
+        + df['learning_rate'].astype(str)
+        + '|'
+        + df['layer_size'].astype(str)
+        + '|'
+        + df['num_layers'].astype(str)
+        + '|'
+        + df['Feature'].astype(str)
+    )
+    df['rank test loss'] = df.groupby('Split Method')['Test Loss'].rank()
+    architecture_scores = (
+        df.groupby('condition', as_index=False)[
+            ['rank test loss', 'Test Loss', 'Pearson - Test', 'Spearman - Test']
+        ]
+        .mean()
+        .sort_values(by='condition')
+        .sort_values(by='rank test loss', kind='stable')
+    )
+    top_condition = str(architecture_scores.iloc[0]['condition'])
+    batch_size, learning_rate, layer_size, num_layers, _ = top_condition.split('|')
+    bs = int(batch_size)
+    lr = float(learning_rate)
+    hidden = int(layer_size)
+    layers = int(num_layers)
+    print(f'Selected architecture: batch_size={bs}, learning_rate={lr}, layer_size={hidden}, num_layers={layers}')
 
-    ## get splits, split up runs by split method and get rank of test loss within each split
-    splits = list(set(df['Split Method']))
-    df_ls = []
-    for x in splits:
-        current_df = (df[df['Split Method'] == x].copy())
-        current_df['rank test loss'] = current_df['Test Loss'].rank()
-        df_ls.append(current_df)
-
-    ## concat all splits
-    df_mod = pd.concat(df_ls)
-
-    ## get mean of test loss, pearson, spearman for each condition
-    data_p1 = df_mod.groupby('condition')[['rank test loss', 'Test Loss', 'Pearson - Test', 'Spearman - Test']].mean().sort_values(by='rank test loss', ascending=True)
-
-    ## get list of rank test losses for each condition
-    data_p2 = df_mod.groupby('condition')[['rank test loss']].agg(list).sort_values(by='rank test loss', key=lambda x: x.map(len), ascending=True)
-    data_p2.rename(columns={'rank test loss': 'rank test losses - random'}, inplace=True)
-
-    ## merge data_p1 and data_p2
-    data_collated = pd.merge(data_p1, data_p2, on='condition', how='inner')
-    data_collated.reset_index(inplace=True)
-
-    ## get bs, lr, hidden, layers, ft from condition column
-    data_collated[['bs', 'lr', 'hidden', 'layers', 'ft']] = data_collated['condition'].str.split('|', expand=True)
-
-    # return the bs, lr, hidden, layers, ft for the top rank architecture
-    top_arch = data_collated.sort_values(by='rank test loss', ascending=True).head(1)
-    bs = int(top_arch['bs'].values[0])
-    lr = float(top_arch['lr'].values[0])
-    hidden = int(top_arch['hidden'].values[0])
-    layers = int(top_arch['layers'].values[0])
-    print(bs, lr, hidden, layers)
-
-    # Train fully connected neural network model with best architecture
-
-    ## config of best architecture
     config = {
-            'layer_size': hidden,
-            'num_layers' : layers,
-            'learning_rate': lr,
-            'batch_size': bs,
-            'optimizer': 'adam',
-            'epochs': 300
+        'layer_size': hidden,
+        'num_layers': layers,
+        'learning_rate': lr,
+        'batch_size': bs,
+        'optimizer': 'adam',
+        'epochs': 300,
     }
 
-    ## initialize splits
+    # Train the final fold ensemble with the selected architecture.
     split = KFoldProteinSplitter(protein_name, training_dataset_fname, wt_files, csv_has_header=True, use_cache=True, y_scaling=True, val_split=0.15)
     splits = split.generate_splits(n_splits=10)
 
-    ## initialize feature
     feature = OneHotFeaturizer(protein=protein_name, use_cache=True)
-
-    ## initialize and train models
     models = []
     for split in splits:
         model = Fcn(split, feature, config=config, use_cache=True)
@@ -169,13 +247,7 @@ def main():
 
     print("Proposing mutations...")
 
-    ## initialize proposer and evaluate proposals
-    proposer = CombinatorialProposer(
-        start_seq=wt_seq,
-        models=models,
-        trust_radius=11,
-        num_seeds=-1, # evaluate all seeds
-        mutation_pool=mutation_pool)
+    proposer.models = models
     proposer.propose(output_df=False)
     proposer.evaluate_proposals()
     proposer.save_proposals(f'{experiment_name}_proposals_all')
@@ -183,9 +255,10 @@ def main():
     # get top n variants per mutational load
     df = proposer.proposals
     df_ls = []
-    for num_mut in range(3, 11, 1):
+    for num_mut in range(min_mutations, max_mutations + 1):
         subset = df[df['num_muts'] == num_mut].copy()
-        subset.sort_values(by='average', ascending=False, inplace=True)
+        subset.sort_values(by='Mut_string', inplace=True)
+        subset.sort_values(by='average', ascending=False, kind='stable', inplace=True)
         top_subset = subset.head(top_muts_per_load).copy()
         df_ls.append(top_subset)
     top_df = pd.concat(df_ls, ignore_index=True)
@@ -193,7 +266,11 @@ def main():
     # Export results
     print('Saving all proposals...')
     top_df.to_csv(os.path.join(splits[0].file_attrs['dataset_dir'], 'proposers/results', f'{experiment_name}_proposals_top_{top_muts_per_load}.csv'), index=False)
-    top_df[['Mut_string']].to_csv(os.path.join(splits[0].file_attrs['dataset_dir'], f'{export_name}.csv'), index=False,header=None)
+    top_df[['Mut_string']].to_csv(
+        os.path.join(splits[0].file_attrs['dataset_dir'], f'{export_name}.csv'),
+        index=False,
+        header=False,
+    )
 
     # functions for multichain proteins
 
@@ -281,12 +358,17 @@ def main():
 
 
         for col in df_mutations.columns[1:]:
-            mutations = set(df_mutations[col].tolist())
-            if '' in mutations:
-                mutations.remove('')
-            #convert mutations to a dataframe for csv export
-            df_mutations_col = pd.DataFrame(mutations, columns=[col])
-            df_mutations_col.to_csv(os.path.join(splits[0].file_attrs['dataset_dir'], f'{export_name}_{col}_mutants.csv'), index=False, header=None)
+            mutations = sorted({mutation for mutation in df_mutations[col].tolist() if mutation})
+            # Convert mutations to a dataframe for CSV export.
+            df_mutations_col = pd.DataFrame({str(col): mutations})
+            df_mutations_col.to_csv(
+                os.path.join(
+                    splits[0].file_attrs['dataset_dir'],
+                    f'{export_name}_{col}_mutants.csv',
+                ),
+                index=False,
+                header=False,
+            )
 
 
 if __name__ == "__main__":

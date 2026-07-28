@@ -47,8 +47,11 @@ The ```p2_propose.py``` script identifies the best performing neural network mod
 - ```--protein-name```: Name of the protein.
 - ```--wt-files```: Path to the FASTA file for the wildtype protein sequence. Can be a single file or a comma-separated list of files (e.g. ```chain1.fasta,chain2.fasta```) for a protein complex.
 - ```--training-dataset```: Path to the training dataset CSV file.
-- ```--mutation-pool```: Path to the mutation pool CSV file, which is a list of mutations to be used to generate the proposed combinatorial variants. Example is provided in ```data/example_protein/combo_muts.csv```.
+- ```--mutation-pool```: Path to a one-column, no-header CSV of validated single substitutions used to generate combinatorial variants. Example: ```data/example_protein/combo_muts.csv```.
+- ```--min-mutations```: Minimum number of substitutions per proposed variant (default: 3).
+- ```--max-mutations```: Maximum number of substitutions per proposed variant (default: 10). The bounded CLI now defaults to 3–10; the previous implementation hard-coded loads 2–11. The paper's experiments support prioritizing variants with at most 7 substitutions.
 - ```--top-muts-per-load```: Number of variants to clone per mutational load (default: 3).
+- ```--max-candidates```: Safety limit checked before model training and candidate generation (default: 100000).
 - ```--export-name```: Name of the exported file containing the proposed variants.
 
 ```bash
@@ -58,7 +61,10 @@ multievolve propose \
 --wt-files <fasta file> \
 --training-dataset <csv file> \
 --mutation-pool <csv file> \
+--min-mutations 3 \
+--max-mutations 7 \
 --top-muts-per-load <number of mutants> \
+--max-candidates 100000 \
 --export-name <name>
 ```
 
@@ -111,7 +117,10 @@ multievolve propose \
 --wt-files apex.fasta \
 --training-dataset example_dataset.csv \
 --mutation-pool combo_muts.csv \
+--min-mutations 3 \
+--max-mutations 7 \
 --top-muts-per-load 3 \
+--max-candidates 100000 \
 --export-name multievolve_proposals
 ```
 

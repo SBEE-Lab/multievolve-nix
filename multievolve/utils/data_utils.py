@@ -10,6 +10,40 @@ import Levenshtein
 from torch.utils.data import DataLoader, Dataset
 import torch
 
+_SINGLE_SUBSTITUTION_PATTERN = re.compile(r"^([A-Za-z])([1-9][0-9]*)([A-Za-z])$")
+SUPPORTED_PROTEIN_AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWYX")
+
+
+def parse_single_substitution(mutation):
+    """Return a canonical substitution and its WT residue, position, and mutant residue."""
+    if not isinstance(mutation, str):
+        raise ValueError(f"single substitution must be a string: {mutation!r}")
+    canonical = mutation.strip().upper()
+    match = _SINGLE_SUBSTITUTION_PATTERN.fullmatch(canonical)
+    if match is None:
+        raise ValueError(f"invalid single substitution: {mutation!r}")
+    wt_aa, position, mutant_aa = match.groups()
+    return canonical, wt_aa, int(position), mutant_aa
+
+
+def validate_single_substitution(mutation, wt_seq):
+    """Validate and canonicalize a protein single substitution against its WT."""
+    canonical, wt_aa, position, mutant_aa = parse_single_substitution(mutation)
+    wt_seq = str(wt_seq).upper()
+    if wt_aa not in SUPPORTED_PROTEIN_AMINO_ACIDS or mutant_aa not in SUPPORTED_PROTEIN_AMINO_ACIDS:
+        raise ValueError(f"unsupported amino acid: {canonical}")
+    if position > len(wt_seq):
+        raise ValueError(f"mutation position is outside the WT sequence: {canonical}")
+    if wt_seq[position - 1] != wt_aa:
+        raise ValueError(
+            f"mutation WT residue does not match the sequence: {canonical} starts from "
+            f"{wt_aa}, expected {wt_seq[position - 1]}"
+        )
+    if wt_aa == mutant_aa:
+        raise ValueError(f"no-op mutation: {canonical}")
+    return canonical, wt_aa, position, mutant_aa
+
+
 # Given a set of mutations separated by "/" (e.g "G19S/R420G"), convert it into a list; if given 'WT', return ['WT']
 def convert_mutation_list(string):
     """
@@ -62,13 +96,13 @@ def mutation_format_check(mutation):
     Returns:
     - str: Format of the mutation ('Mutation String', 'Mutation List', or 'Full Sequence').
     """
-    if type(mutation) == str:
+    if isinstance(mutation, str):
         if re.search(r'[a-zA-Z]\d+[a-zA-Z]', mutation) or mutation == 'WT':
             return 'Mutation String'
         else:
             return 'Full Sequence'
         
-    if type(mutation) == list or type(mutation) == tuple:
+    if isinstance(mutation, (list, tuple)):
         assert re.search(r'[a-zA-Z]\d+[a-zA-Z]', mutation[0]), f"{mutation[0]} is not a true mutation"
         return 'Mutation List'
 
@@ -403,10 +437,14 @@ class MutationListFormats:
         - list: List of unique single mutations.
         """
         mutation_lists = self.to_mutation_lists()
-        mutation_pool = set()
+        mutation_pool = []
+        seen = set()
         for mutation_list in mutation_lists:
-            mutation_pool.update(mutation_list)
-        return list(mutation_pool)
+            for mutation in mutation_list:
+                if mutation not in seen:
+                    seen.add(mutation)
+                    mutation_pool.append(mutation)
+        return mutation_pool
 
 # This code snippet was taken from https://github.com/VincentQTran/low-N-protein-engineering/blob/master/analysis/common/utils.py
 def levenshtein_distance_matrix(a_list, b_list=None, verbose=False):
