@@ -40,6 +40,15 @@
           }
         );
 
+      # Call check modules with only the arguments they declare.
+      callWith = args: fn: fn (builtins.intersectAttrs (builtins.functionArgs fn) args);
+
+      checkNames = lib.mapAttrsToList (name: _type: lib.removeSuffix ".nix" name) (
+        lib.filterAttrs (name: type: type == "regular" && lib.hasSuffix ".nix" name) (
+          builtins.readDir ./nix/checks
+        )
+      );
+
       treefmtEval = eachSystem (
         { pkgs, ... }:
         treefmt-nix.lib.evalModule pkgs {
@@ -83,49 +92,19 @@
         mainProgram = "multievolve-streamlit";
       };
 
-      streamlitPackageContract = pkgs.runCommand "multievolve-streamlit-package-contract" { } ''
-        export HOME="$TMPDIR"
-        timeout=${pkgs.coreutils}/bin/timeout
-        $timeout 120 ${streamlitPackage}/bin/multievolve-streamlit --help >/dev/null
-        $timeout 120 ${streamlitPackage}/bin/python -m multievolve.cli.train --help >/dev/null
-        $timeout 120 ${streamlitPackage}/bin/python -m multievolve.cli.propose --help >/dev/null
-        $timeout 120 ${streamlitPackage}/bin/python -m multievolve.cli.assembly_design --help >/dev/null
-        $timeout 120 ${streamlitPackage}/bin/python -m multievolve.cli.plm_zeroshot_ensemble --help >/dev/null
-        touch "$out"
-      '';
-
-      invalidModuleConfiguration = lib.nixosSystem {
-        system = linuxSystem;
-        modules = [
-          self.nixosModules.multievolve-streamlit
-          {
-            system.stateVersion = "26.11";
-            services.multievolve-streamlit = {
-              enable = true;
-              package = streamlitPackage;
-              environment.HOME = "/wrong/home";
-              workingDirectory = "/tmp/multievolve";
-            };
-          }
-        ];
-      };
-      failedModuleAssertions = builtins.filter (
-        assertion: !assertion.assertion
-      ) invalidModuleConfiguration.config.assertions;
-      streamlitModuleEvaluationContract =
-        assert lib.any (
-          assertion: lib.hasInfix "environment may not override HOME" assertion.message
-        ) failedModuleAssertions;
-        assert lib.any (
-          assertion: lib.hasInfix "workingDirectory must be a dedicated writable path" assertion.message
-        ) failedModuleAssertions;
-        pkgs.runCommand "multievolve-streamlit-module-evaluation-contract" { } ''
-          touch "$out"
-        '';
+      linuxChecks = lib.genAttrs checkNames (
+        name:
+        callWith {
+          inherit nixpkgs;
+          inherit pkgs self streamlitPackage;
+          system = linuxSystem;
+          streamlitModule = self.nixosModules.multievolve-streamlit;
+        } (import (./nix/checks + "/${name}.nix"))
+      );
     in
     {
       nixosModules = rec {
-        multievolve-streamlit = import ./nixosModules/multievolve-streamlit.nix { inherit self; };
+        multievolve-streamlit = import ./nix/nixosModules/multievolve-streamlit.nix { inherit self; };
         default = multievolve-streamlit;
       };
 
@@ -147,15 +126,7 @@
         {
           formatting = treefmtEval.${system}.config.build.check self;
         }
-        // lib.optionalAttrs (system == linuxSystem) {
-          inherit (ws) venv;
-          multievolve-streamlit-module = import ./nixosTests/multievolve-streamlit.nix {
-            inherit pkgs;
-            module = self.nixosModules.multievolve-streamlit;
-          };
-          multievolve-streamlit-module-evaluation-contract = streamlitModuleEvaluationContract;
-          multievolve-streamlit-package-contract = streamlitPackageContract;
-        }
+        // lib.optionalAttrs (system == linuxSystem) ({ inherit (ws) venv; } // linuxChecks)
       );
 
       formatter = eachSystem ({ system, ... }: treefmtEval.${system}.config.build.wrapper);
