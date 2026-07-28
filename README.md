@@ -82,19 +82,44 @@ With the Nix flake, the packaged app can also be run directly:
 nix run .#multievolve-streamlit
 ```
 
-For NixOS deployments, import the flake module and enable the service:
+For NixOS deployments, import the flake module and keep the service on its
+loopback default:
 ```nix
 {
   imports = [ inputs.multievolve.nixosModules.multievolve-streamlit ];
 
   services.multievolve-streamlit = {
     enable = true;
-    host = "0.0.0.0";
     port = 8501;
-    openFirewall = true;
+    workingDirectory = "/var/lib/multievolve-streamlit";
   };
 }
 ```
+
+`workingDirectory` is the service's dedicated writable state root and is also
+used for `HOME` and `MULTIEVOLVE_ROOT`. Set this option, rather than overriding
+those environment variables, when state should live elsewhere. Because the unit
+uses `ProtectHome` and `PrivateTmp`, choose a persistent path outside `/home`,
+`/root`, `/tmp`, and `/var/tmp`.
+
+The Streamlit application does not provide authentication or per-user workspace
+isolation. Do not expose it by setting `host = "0.0.0.0"` and `openFirewall =
+true` on an untrusted network. Put non-loopback deployments behind an
+authenticated TLS reverse proxy and restrict network access.
+
+CUDA execution additionally requires an NVIDIA driver compatible with the
+packaged CUDA runtime and a working NixOS NVIDIA/OpenGL configuration. Systems
+with restricted device permissions may need:
+
+```nix
+services.multievolve-streamlit.extraGroups = [ "video" "render" ];
+```
+
+Model checkpoints are downloaded below the service's writable home by default.
+For pre-populated checkpoints, use a service-readable path outside `/home` and
+point the relevant cache environment variable, such as `TORCH_HOME`, at it. The
+service's strict filesystem protection keeps such paths read-only unless they
+are explicitly added to `ReadWritePaths`.
 <p align="center">
   <img src="multievolve/streamlit_1.png" alt="GUI interface image 1" width="600">
 </p>
