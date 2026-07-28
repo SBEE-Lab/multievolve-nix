@@ -1,9 +1,11 @@
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from multievolve.app import stream_command_output
 from multievolve.app_io import (
     AppInputError,
     prepare_uploaded_inputs,
@@ -296,6 +298,50 @@ class AppInputSecurityTests(unittest.TestCase):
             self.assertEqual(
                 list(prepared.project_dir.glob(".*.tmp")),
                 [],
+            )
+
+
+class TerminalOutputSecurityTests(unittest.TestCase):
+    def test_child_output_is_streamed_as_text_without_a_shell(self):
+        payload = "</code></pre><img src=x onerror=alert(1)>"
+        ansi_payload = "\x1b[31m& second line\x1b[0m"
+        process = MagicMock()
+        process.stdout.readline.side_effect = [
+            f"{payload}\n",
+            f"{ansi_payload}\n",
+            "",
+        ]
+        process.wait.return_value = 17
+        placeholder = MagicMock()
+        command = ["python", "-c", "print('untrusted')"]
+
+        with patch("multievolve.app.subprocess.Popen", return_value=process) as popen:
+            return_code = stream_command_output(command, placeholder)
+
+        self.assertEqual(return_code, 17)
+        popen.assert_called_once_with(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self.assertNotIn("shell", popen.call_args.kwargs)
+        placeholder.markdown.assert_not_called()
+        self.assertEqual(placeholder.code.call_count, 3)
+        self.assertEqual(placeholder.code.call_args_list[0].args[0], payload)
+        self.assertEqual(
+            placeholder.code.call_args_list[-1].args[0],
+            f"{payload}\n{ansi_payload}",
+        )
+        for call in placeholder.code.call_args_list:
+            self.assertEqual(
+                call.kwargs,
+                {
+                    "language": None,
+                    "wrap_lines": True,
+                    "height": 400,
+                },
             )
 
 

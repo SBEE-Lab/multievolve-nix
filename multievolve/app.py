@@ -34,7 +34,7 @@ def setup_page():
         layout="wide"
     )
 
-    # Custom branded header with subtitle
+    # Source-controlled static markup only; runtime output is rendered with st.code.
     st.markdown("""
         <h1 style="margin-bottom: 0; padding-bottom: 0;">MULTI-evolve</h1>
         <p style="color: #666; margin-top: 0.2rem; font-size: 1.05rem;">
@@ -43,23 +43,9 @@ def setup_page():
         <hr style="margin-top: 0.5rem; margin-bottom: 0.5rem; border: none; border-top: 1px solid #e0e0e0;">
     """, unsafe_allow_html=True)
 
-    # Global styles — injected once, available to all tabs
+    # Source-controlled global styles — injected once, available to all tabs
     st.markdown("""
         <style>
-            /* Terminal output container (used by all tabs) */
-            .terminal-container {
-                max-height: 400px;
-                overflow-y: auto;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 12px;
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-                font-size: 0.85rem;
-                white-space: pre-wrap;
-            }
-
             /* Reduce default top padding */
             .block-container {
                 padding-top: 2rem;
@@ -135,10 +121,36 @@ def validate_name(value, label):
         return None
 
 
+def render_terminal_output(placeholder, output):
+    """Render child-process output as text rather than browser-interpreted HTML."""
+    placeholder.code(
+        output,
+        language=None,
+        wrap_lines=True,
+        height=400,
+    )
 
 
+def stream_command_output(command, placeholder):
+    """Run one argv-based child process while streaming its combined output."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    if process.stdout is None:
+        raise RuntimeError("Child process did not provide an output stream")
 
+    output_lines = []
+    for line in iter(process.stdout.readline, ""):
+        output_lines.append(line.rstrip())
+        render_terminal_output(placeholder, "\n".join(output_lines))
 
+    return_code = process.wait()
+    render_terminal_output(placeholder, "\n".join(output_lines))
+    return return_code
 
 def train_models():
     """Train neural network models section"""
@@ -227,41 +239,16 @@ def train_models():
                 terminal_output = st.empty()
 
             with st.spinner("Training models..."):
-                # Run the command and capture all output
-                process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True
-                )
+                return_code = stream_command_output(command, terminal_output)
 
-                output_lines = []
-
-                # Stream output in real-time
-                for line in iter(process.stdout.readline, ''):
-                    output_lines.append(line.rstrip())
-                    # Update the terminal display with all output so far
-                    terminal_text = '\n'.join(output_lines)
-                    terminal_output.markdown(f'<div class="terminal-container"><pre><code>{terminal_text}</code></pre></div>',
-                                          unsafe_allow_html=True)
-
-                process.wait()
-
-                # Keep the final scrollable output instead of replacing with code block
-                final_output = '\n'.join(output_lines)
-                terminal_output.markdown(f'<div class="terminal-container"><pre><code>{final_output}</code></pre></div>',
-                                      unsafe_allow_html=True)
-
-                if process.returncode == 0:
+                if return_code == 0:
                     st.success("✅ Model training completed successfully!")
                 else:
-                    st.error(f"❌ Training failed with exit code: {process.returncode}")
+                    st.error(f"❌ Training failed with exit code: {return_code}")
 
-        except Exception as e:
-            st.error(f"Error during training: {str(e)}")
-            st.exception(e)
+        except Exception:
+            logger.exception("Unexpected failure while training models")
+            st.error("Unexpected training failure. Check the service logs for details.")
 
 def propose_mutations():
     """Propose mutations section"""
@@ -379,41 +366,18 @@ def propose_mutations():
                 terminal_output = st.empty()
 
             with st.spinner("Proposing mutations..."):
-                # Run the command and capture all output
-                process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True
-                )
+                return_code = stream_command_output(command, terminal_output)
 
-                output_lines = []
-
-                # Stream output in real-time
-                for line in iter(process.stdout.readline, ''):
-                    output_lines.append(line.rstrip())
-                    # Update the terminal display with all output so far
-                    terminal_text = '\n'.join(output_lines)
-                    terminal_output.markdown(f'<div class="terminal-container"><pre><code>{terminal_text}</code></pre></div>',
-                                          unsafe_allow_html=True)
-
-                process.wait()
-
-                # Keep the final scrollable output instead of replacing with code block
-                final_output = '\n'.join(output_lines)
-                terminal_output.markdown(f'<div class="terminal-container"><pre><code>{final_output}</code></pre></div>',
-                                      unsafe_allow_html=True)
-
-                if process.returncode == 0:
+                if return_code == 0:
                     st.success("✅ MULTI-evolve variants proposed successfully!")
                 else:
-                    st.error(f"❌ MULTI-evolve variants proposal failed with exit code: {process.returncode}")
+                    st.error(
+                        f"❌ MULTI-evolve variants proposal failed with exit code: {return_code}"
+                    )
 
-        except Exception as e:
-            st.error(f"Error during mutation proposal: {str(e)}")
-            st.exception(e)
+        except Exception:
+            logger.exception("Unexpected failure while proposing mutations")
+            st.error("Unexpected proposal failure. Check the service logs for details.")
 
 def design_oligos():
     """Design MULTI-assembly oligos section"""
@@ -504,41 +468,16 @@ def design_oligos():
                 terminal_output = st.empty()
 
             with st.spinner("Designing oligos..."):
-                # Run the command and capture all output
-                process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True
-                )
+                return_code = stream_command_output(command, terminal_output)
 
-                output_lines = []
-
-                # Stream output in real-time
-                for line in iter(process.stdout.readline, ''):
-                    output_lines.append(line.rstrip())
-                    # Update the terminal display with all output so far
-                    terminal_text = '\n'.join(output_lines)
-                    terminal_output.markdown(f'<div class="terminal-container"><pre><code>{terminal_text}</code></pre></div>',
-                                          unsafe_allow_html=True)
-
-                process.wait()
-
-                # Keep the final scrollable output instead of replacing with code block
-                final_output = '\n'.join(output_lines)
-                terminal_output.markdown(f'<div class="terminal-container"><pre><code>{final_output}</code></pre></div>',
-                                      unsafe_allow_html=True)
-
-                if process.returncode == 0:
+                if return_code == 0:
                     st.success("✅ Oligo design completed successfully!")
                 else:
-                    st.error(f"❌ Oligo design failed with exit code: {process.returncode}")
+                    st.error(f"❌ Oligo design failed with exit code: {return_code}")
 
-        except Exception as e:
-            st.error(f"Error during oligo design: {str(e)}")
-            st.exception(e)
+        except Exception:
+            logger.exception("Unexpected failure while designing oligos")
+            st.error("Unexpected oligo-design failure. Check the service logs for details.")
 
 def zeroshot_predictions():
     """Perform zero-shot predictions section"""
@@ -621,41 +560,18 @@ def zeroshot_predictions():
                 terminal_output = st.empty()
 
             with st.spinner("Running Zero-shot Predictions..."):
-                # Run the command and capture all output
-                process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True
-                )
+                return_code = stream_command_output(command, terminal_output)
 
-                output_lines = []
-
-                # Stream output in real-time
-                for line in iter(process.stdout.readline, ''):
-                    output_lines.append(line.rstrip())
-                    # Update the terminal display with all output so far
-                    terminal_text = '\n'.join(output_lines)
-                    terminal_output.markdown(f'<div class="terminal-container"><pre><code>{terminal_text}</code></pre></div>',
-                                          unsafe_allow_html=True)
-
-                process.wait()
-
-                # Keep the final scrollable output instead of replacing with code block
-                final_output = '\n'.join(output_lines)
-                terminal_output.markdown(f'<div class="terminal-container"><pre><code>{final_output}</code></pre></div>',
-                                      unsafe_allow_html=True)
-
-                if process.returncode == 0:
+                if return_code == 0:
                     st.success("✅ Zero-shot predictions completed successfully!")
                 else:
-                    st.error(f"❌ Zero-shot predictions failed with exit code: {process.returncode}")
+                    st.error(
+                        f"❌ Zero-shot predictions failed with exit code: {return_code}"
+                    )
 
-        except Exception as e:
-            st.error(f"Error during zero-shot predictions: {str(e)}")
-            st.exception(e)
+        except Exception:
+            logger.exception("Unexpected failure while running zero-shot predictions")
+            st.error("Unexpected zero-shot failure. Check the service logs for details.")
 
 def about():
     st.markdown("""
