@@ -182,6 +182,11 @@ def train_models():
             st.divider()
             experiment_name = st.text_input("Experiment Name", value="test")
             mode = st.selectbox("Training Mode", ["test", "standard"])
+            seed = st.number_input("Seed", min_value=0, max_value=2**32 - 1, value=42)
+            split_seed = st.number_input("Split Seed", min_value=0, max_value=2**32 - 1, value=42)
+            cv_folds = st.number_input("CV Folds", min_value=2, value=5)
+            device = st.selectbox("Training Device", ["auto", "cpu", "cuda"])
+            deterministic = st.checkbox("Deterministic Mode", value=False)
 
         with col2:
             st.markdown("""
@@ -197,6 +202,10 @@ def train_models():
                 - **Training Mode**:
                     - `test`: Test the training process for a single architecture.
                     - `standard`: Performs a grid search over many architectures. Will take a longer time to run.
+                - **Seed/Split Seed**: Base model seed and fold-assignment seed.
+                - **CV Folds**: Number of architecture-selection cross-validation folds (default: 5).
+                - **Training Device**: `auto`, `cpu`, or required `cuda`.
+                - **Deterministic Mode**: Requests deterministic PyTorch algorithms; unsupported operations fail explicitly.
                 """)
 
         submitted = st.form_submit_button("Train Models", type="primary")
@@ -221,8 +230,14 @@ def train_models():
                 "--protein-name", protein_name,
                 "--wt-files", ",".join(str(wt_path) for wt_path in wt_paths),
                 "--training-dataset-fname", str(dataset_path),
-                "--mode", mode
+                "--mode", mode,
+                "--seed", str(seed),
+                "--split-seed", str(split_seed),
+                "--cv-folds", str(cv_folds),
+                "--device", device,
             ]
+            if deterministic:
+                command.append("--deterministic")
 
             st.subheader("Terminal Output:")
             st.code(f"$ {' '.join(command)}", language="bash")
@@ -284,6 +299,11 @@ def propose_mutations():
             max_mutations = st.number_input("Maximum Mutations", min_value=2, value=10)
             top_muts = st.number_input("Top Mutations per Load", min_value=1, value=3)
             max_candidates = st.number_input("Maximum Candidates", min_value=1, value=100000)
+            seed = st.number_input("Seed", min_value=0, max_value=2**32 - 1, value=42, key="propose_seed")
+            split_seed = st.number_input("Split Seed", min_value=0, max_value=2**32 - 1, value=42, key="propose_split_seed")
+            ensemble_folds = st.number_input("Ensemble Folds", min_value=2, value=10)
+            device = st.selectbox("Training Device", ["auto", "cpu", "cuda"], key="propose_device")
+            deterministic = st.checkbox("Deterministic Mode", value=False, key="propose_deterministic")
             export_name = st.text_input("Export Name", value="multievolve_proposals")
 
         with col2:
@@ -301,6 +321,10 @@ def propose_mutations():
                 - **Minimum/Maximum Mutations**: Inclusive mutational-load range to generate. The CLI retains the historical 3–10 defaults; the paper's experiments support prioritizing variants with at most 7 substitutions.
                 - **Top Mutations per Load**: Number of top mutations to propose per mutational load.
                 - **Maximum Candidates**: Safety limit checked before final model training and combinatorial candidate generation.
+                - **Seed/Split Seed**: Base ensemble-model seed and fold-assignment seed.
+                - **Ensemble Folds**: Number of final models retrained with the selected architecture (default: 10).
+                - **Training Device**: `auto`, `cpu`, or required `cuda`.
+                - **Deterministic Mode**: Requests deterministic PyTorch algorithms; unsupported operations fail explicitly.
                 - **Export Name**: Name of the exported csv file containing the list of the proposed variants. This csv file can be used to generate MULTI-assembly mutagenic oligos for cloning the proposed variants in the ```Design MULTI-assembly Oligos``` tab.
                 """)
             with st.expander("Outputs", expanded=False):
@@ -340,8 +364,14 @@ def propose_mutations():
                 "--max-mutations", str(max_mutations),
                 "--top-muts-per-load", str(top_muts),
                 "--max-candidates", str(max_candidates),
+                "--seed", str(seed),
+                "--split-seed", str(split_seed),
+                "--ensemble-folds", str(ensemble_folds),
+                "--device", device,
                 "--export-name", export_name
             ]
+            if deterministic:
+                command.append("--deterministic")
 
             st.subheader("Terminal Output:")
             st.code(f"$ {' '.join(command)}", language="bash")

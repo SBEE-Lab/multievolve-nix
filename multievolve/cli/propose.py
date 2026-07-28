@@ -21,6 +21,7 @@ p2_propose.py \
 """
 
 import argparse
+import json
 import os
 
 import matplotlib
@@ -36,12 +37,27 @@ from multievolve.proposers import CombinatorialProposer  # noqa: E402
 from multievolve.splitters import KFoldProteinSplitter  # noqa: E402
 from multievolve.utils.data_utils import validate_single_substitution  # noqa: E402
 from multievolve.utils.local_sweep import load_sweep_results  # noqa: E402
+from multievolve.utils.reproducibility import (  # noqa: E402
+    resolve_device,
+    runtime_identity,
+    seed_everything,
+    sha256_file,
+    sha256_json,
+    stable_seed,
+)
 
 
 def _positive_int(value):
     value = int(value)
     if value < 1:
         raise argparse.ArgumentTypeError('must be a positive integer')
+    return value
+
+
+def _seed(value):
+    value = int(value)
+    if not 0 <= value < 2**32:
+        raise argparse.ArgumentTypeError('must satisfy 0 <= seed < 2**32')
     return value
 
 
@@ -136,6 +152,16 @@ def parse_args():
         default=100000,
         help='Fail before training if the requested search exceeds this many candidates (default: 100000)'
     )
+    parser.add_argument('--seed', type=_seed, default=42)
+    parser.add_argument(
+        '--split-seed',
+        type=_seed,
+        default=None,
+        help='Fold-assignment seed (default: --seed)',
+    )
+    parser.add_argument('--ensemble-folds', type=_positive_int, default=10)
+    parser.add_argument('--device', choices=['auto', 'cpu', 'cuda'], default='auto')
+    parser.add_argument('--deterministic', action='store_true')
     parser.add_argument(
         '--export-name',
         required=True,
@@ -143,6 +169,9 @@ def parse_args():
     )
     args = parser.parse_args()
     args.wt_files = [f.strip() for f in args.wt_files.split(',')]
+    args.split_seed = args.seed if args.split_seed is None else args.split_seed
+    if args.ensemble_folds < 2:
+        raise SystemExit('error: --ensemble-folds must be at least 2')
     return args
 
 
@@ -164,6 +193,8 @@ def main():
     max_mutations = args.max_mutations
     max_candidates = args.max_candidates
     export_name = args.export_name
+    seed_everything(args.seed, deterministic=args.deterministic)
+    actual_device = resolve_device(args.device)
 
     # Validate the search before loading sweep results or training final models.
     if min_mutations > max_mutations:
@@ -235,13 +266,33 @@ def main():
     }
 
     # Train the final fold ensemble with the selected architecture.
-    split = KFoldProteinSplitter(protein_name, training_dataset_fname, wt_files, csv_has_header=True, use_cache=True, y_scaling=True, val_split=0.15)
-    splits = split.generate_splits(n_splits=10)
+    split = KFoldProteinSplitter(
+        protein_name,
+        training_dataset_fname,
+        wt_files,
+        csv_has_header=True,
+        use_cache=True,
+        random_state=args.split_seed,
+        y_scaling=True,
+        val_split=0.15,
+    )
+    splits = split.generate_splits(n_splits=args.ensemble_folds)
 
     feature = OneHotFeaturizer(protein=protein_name, use_cache=True)
     models = []
-    for split in splits:
-        model = Fcn(split, feature, config=config, use_cache=True)
+    model_seeds = []
+    for fold_index, split in enumerate(splits):
+        model_seed = stable_seed(args.seed, 'propose', fold_index, top_condition)
+        model_seeds.append(model_seed)
+        seed_everything(model_seed, deterministic=args.deterministic)
+        model_config = {
+            **config,
+            'seed': model_seed,
+            'dataloader_seed': stable_seed(model_seed, 'dataloader'),
+            'deterministic': args.deterministic,
+            'device': args.device,
+        }
+        model = Fcn(split, feature, config=model_config, use_cache=True)
         model.run_model()
         models.append(model)
 
@@ -369,6 +420,61 @@ def main():
                 index=False,
                 header=False,
             )
+
+    manifest = {
+        'schema_version': 2,
+        'command': 'propose',
+        'experiment_name': experiment_name,
+        'seed': args.seed,
+        'split_seed': args.split_seed,
+        'deterministic': args.deterministic,
+        'fold_count': args.ensemble_folds,
+        'dataset_sha256': sha256_file(training_dataset_fname),
+        'wt_fasta_sha256': [sha256_file(path) for path in wt_files],
+        'mutation_pool_sha256': sha256_file(mutation_pool_fname),
+        'min_mutations': min_mutations,
+        'max_mutations': max_mutations,
+        'top_muts_per_load': top_muts_per_load,
+        'max_candidates': max_candidates,
+        'candidate_count_by_load': candidate_counts,
+        'selected_architecture': {
+            'batch_size': bs,
+            'learning_rate': lr,
+            'layer_size': hidden,
+            'num_layers': layers,
+        },
+        'model_seeds': model_seeds,
+        'fold_assignment_sha256': sha256_json(
+            splits[0].data['fold'].astype(int).tolist()
+        ),
+        'fold_scalers': [
+            {
+                'fold_index': fold_index,
+                'split_name': fold.splits['split_name'],
+                'validation_seed': stable_seed(
+                    args.split_seed,
+                    'validation',
+                    f'kfold-{fold_index}',
+                    -1,
+                ),
+                'data_min': fold.splits['target_scaler'].data_min_.tolist(),
+                'data_max': fold.splits['target_scaler'].data_max_.tolist(),
+            }
+            for fold_index, fold in enumerate(splits)
+        ],
+        'model_artifact_sha256': [sha256_file(model.model_path) for model in models],
+        'prediction_ensemble_size': len(models),
+        'runtime': runtime_identity(actual_device),
+    }
+    manifest_path = os.path.join(
+        splits[0].file_attrs['dataset_dir'],
+        'proposers',
+        'results',
+        f'{experiment_name}_proposals_manifest.json',
+    )
+    with open(manifest_path, 'w') as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+        handle.write('\n')
 
 
 if __name__ == "__main__":
