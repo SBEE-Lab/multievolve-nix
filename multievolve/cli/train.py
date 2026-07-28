@@ -12,8 +12,14 @@ matplotlib.use("Agg")
 from multievolve.featurizers import OneHotFeaturizer  # noqa: E402
 from multievolve.predictors import Fcn, run_nn_model_experiments  # noqa: E402
 from multievolve.splitters import KFoldProteinSplitter  # noqa: E402
-from multievolve.utils.local_sweep import write_manifest  # noqa: E402
+from multievolve.utils.local_sweep import (  # noqa: E402
+    ARTIFACT_SCHEMA_VERSION,
+    initialize_manifest,
+    update_manifest,
+)
 from multievolve.utils.reproducibility import (  # noqa: E402
+    canonical_csv_sha256,
+    canonical_fasta_sha256,
     resolve_device,
     runtime_identity,
     seed_everything,
@@ -73,6 +79,13 @@ def main():
     try:
         seed_everything(args.seed, deterministic=args.deterministic)
         actual_device = resolve_device(args.device)
+        runtime = runtime_identity(actual_device)
+        dataset_canonical = canonical_csv_sha256(args.training_dataset_fname)
+        wt_canonical = [canonical_fasta_sha256(path) for path in args.wt_files]
+        input_identity = sha256_json(
+            {"dataset": dataset_canonical, "wt_fasta": wt_canonical}
+        )
+
         fold_splitter = KFoldProteinSplitter(
             args.protein_name,
             args.training_dataset_fname,
@@ -82,18 +95,55 @@ def main():
             random_state=args.split_seed,
             y_scaling=True,
             val_split=0.15,
+            cache_identity=input_identity,
         )
         splits = fold_splitter.generate_splits(n_splits=args.cv_folds)
         features = [OneHotFeaturizer(protein=args.protein_name, use_cache=True)]
-
-        if args.mode == "test":
-            print("Running in test mode")
-            sweep_depth = "test"
-            search_method = "test"
-        else:
-            print("Running in standard mode")
-            sweep_depth = "standard"
-            search_method = "grid"
+        sweep_depth, search_method = (
+            ("test", "test") if args.mode == "test" else ("standard", "grid")
+        )
+        fold_assignment_sha256 = sha256_json(
+            fold_splitter.data["fold"].astype(int).tolist()
+        )
+        contract = {
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "command": "train",
+            "dataset_canonical_sha256": dataset_canonical,
+            "wt_fasta_canonical_sha256": wt_canonical,
+            "feature": "OneHot",
+            "seed": args.seed,
+            "split_seed": args.split_seed,
+            "fold_count": args.cv_folds,
+            "fold_assignment_sha256": fold_assignment_sha256,
+            "mode": args.mode,
+            "deterministic": args.deterministic,
+            "device": actual_device,
+            "software": runtime,
+        }
+        run_identity = sha256_json(contract)
+        manifest = {
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "run_identity": run_identity,
+            "contract": contract,
+            "provenance": {
+                "dataset_raw_sha256": sha256_file(args.training_dataset_fname),
+                "wt_fasta_raw_sha256": [sha256_file(path) for path in args.wt_files],
+                "runtime": runtime,
+            },
+            "fold_scalers": [
+                {
+                    "fold_index": fold_index,
+                    "split_name": split.splits["split_name"],
+                    "validation_seed": stable_seed(
+                        args.split_seed, "validation", f"kfold-{fold_index}", -1
+                    ),
+                    "data_min": split.splits["target_scaler"].data_min_.tolist(),
+                    "data_max": split.splits["target_scaler"].data_max_.tolist(),
+                }
+                for fold_index, split in enumerate(splits)
+            ],
+        }
+        initialize_manifest(args.experiment_name, manifest)
 
         print(f"Running experiments for {args.experiment_name} with {args.protein_name}...")
         sweep_results = run_nn_model_experiments(
@@ -108,57 +158,24 @@ def main():
             seed=args.seed,
             deterministic=args.deterministic,
             device=args.device,
+            run_identity=run_identity,
         )
-        write_manifest(
-            args.experiment_name,
-            {
-                "schema_version": 2,
-                "command": "train",
-                "experiment_name": args.experiment_name,
-                "seed": args.seed,
-                "split_seed": args.split_seed,
-                "deterministic": args.deterministic,
-                "fold_count": args.cv_folds,
-                "dataset_sha256": sha256_file(args.training_dataset_fname),
-                "wt_fasta_sha256": [sha256_file(path) for path in args.wt_files],
-                "feature": "OneHot",
-                "mode": args.mode,
-                "fold_assignment_sha256": sha256_json(
-                    fold_splitter.data["fold"].astype(int).tolist()
-                ),
-                "fold_scalers": [
-                    {
-                        "fold_index": fold_index,
-                        "split_name": split.splits["split_name"],
-                        "validation_seed": stable_seed(
-                            args.split_seed,
-                            "validation",
-                            f"kfold-{fold_index}",
-                            -1,
-                        ),
-                        "data_min": split.splits["target_scaler"].data_min_.tolist(),
-                        "data_max": split.splits["target_scaler"].data_max_.tolist(),
-                    }
-                    for fold_index, split in enumerate(splits)
-                ],
-                "model_seeds": sweep_results["Model Seed"].astype(int).tolist(),
-                "grid_sha256": sha256_json(
-                    sweep_results[
-                        [
-                            "layer_size",
-                            "num_layers",
-                            "learning_rate",
-                            "batch_size",
-                            "optimizer",
-                            "epochs",
-                        ]
-                    ]
-                    .drop_duplicates()
-                    .to_dict(orient="records")
-                ),
-                "runtime": runtime_identity(actual_device),
-            },
+        manifest["model_seeds"] = sweep_results["Model Seed"].astype(int).tolist()
+        manifest["grid_sha256"] = sha256_json(
+            sweep_results[
+                [
+                    "layer_size",
+                    "num_layers",
+                    "learning_rate",
+                    "batch_size",
+                    "optimizer",
+                    "epochs",
+                ]
+            ]
+            .drop_duplicates()
+            .to_dict(orient="records")
         )
+        update_manifest(args.experiment_name, manifest)
     except Exception as exc:
         print(f"Error running training: {exc}")
         sys.exit(1)

@@ -25,6 +25,7 @@ def run_nn_model_experiments(splits,
                              seed=42,
                              deterministic=False,
                              device="auto",
+                             run_identity=None,
                              ):
     """Run neural network model experiments with hyperparameter sweeps.
 
@@ -40,7 +41,7 @@ def run_nn_model_experiments(splits,
         show_plots (bool, optional): Whether to show matplotlib plots. Defaults to True.
 
     Returns:
-        pandas.DataFrame: Rows written to sweep_results/<experiment_name>.csv
+        pandas.DataFrame: Rows written to sweep_results/<experiment_name>/results.csv
 
     Example:
         >>> splits = [DataSplitter(data, 'random')]
@@ -71,6 +72,7 @@ def run_nn_model_experiments(splits,
         seed=seed,
         deterministic=deterministic,
         device=device,
+        run_identity=run_identity,
     )
 
 
