@@ -1,12 +1,16 @@
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import torch
 from torch import nn, optim
-import numpy as np
-import matplotlib.pyplot as plt
-import os
-import pandas as pd
 
 from multievolve.utils.other_utils import performance_report, log_results
 from multievolve.utils.data_utils import TorchDataProcessor
+from multievolve.utils.reproducibility import resolve_device, seed_everything
+
+_MODEL_SCHEMA_VERSION = 2
 
 # Master Functions to Train and Evaluate Models
 def run_nn_model_experiments(splits,
@@ -17,7 +21,10 @@ def run_nn_model_experiments(splits,
                              sweep_depth="standard",  # standard, custom, test
                              search_method="grid",  # grid, bayes, test
                              count=10,
-                             show_plots=True
+                             show_plots=True,
+                             seed=42,
+                             deterministic=False,
+                             device="auto",
                              ):
     """Run neural network model experiments with hyperparameter sweeps.
 
@@ -33,7 +40,7 @@ def run_nn_model_experiments(splits,
         show_plots (bool, optional): Whether to show matplotlib plots. Defaults to True.
 
     Returns:
-        None: Results are written to sweep_results/<experiment_name>.csv
+        pandas.DataFrame: Rows written to sweep_results/<experiment_name>.csv
 
     Example:
         >>> splits = [DataSplitter(data, 'random')]
@@ -51,7 +58,7 @@ def run_nn_model_experiments(splits,
     # Local grid backend (replaces the W&B sweep). Only grid/test are supported.
     from multievolve.utils.local_sweep import run_local_sweep
 
-    run_local_sweep(
+    return run_local_sweep(
         splits,
         features,
         models,
@@ -61,6 +68,9 @@ def run_nn_model_experiments(splits,
         search_method=search_method,
         count=count,
         show_plots=show_plots,
+        seed=seed,
+        deterministic=deterministic,
+        device=device,
     )
 
 
@@ -104,27 +114,28 @@ class BaseNN(nn.Module):
         self.kwargs = kwargs
         self.nn_arch = "-".join([str(x) for x in nn_arch])
         self.show_plots = show_plots
+        self.seed = int(self.kwargs["config"].get("seed", 42))
+        self.dataloader_seed = int(
+            self.kwargs["config"].get("dataloader_seed", self.seed)
+        )
+        self.deterministic = bool(self.kwargs["config"].get("deterministic", False))
+        seed_everything(self.seed, deterministic=self.deterministic)
+        self.device = torch.device(resolve_device(self.kwargs["config"].get("device", "auto")))
 
         # Setup data
-        self.nn_data_processor = TorchDataProcessor(data_splitter, self.featurizer, self.kwargs["config"]["batch_size"])
-        #[TODO] remove this and only process data once required
-
+        self.nn_data_processor = TorchDataProcessor(
+            data_splitter,
+            self.featurizer,
+            self.kwargs["config"]["batch_size"],
+            seed=self.dataloader_seed,
+        )
         self.split_method = self.nn_data_processor.split_name 
 
         # set model directory
         self.file_attrs = data_splitter.file_attrs
         self.file_attrs['model_dir'] = os.path.join(data_splitter.file_attrs["dataset_dir"], 'model_cache', data_splitter.file_attrs["dataset_name"])
 
-        """Set variables."""
-        if torch.backends.mps.is_available():
-            self.device = torch.device("mps")
-            print("MPS available. Using Apple Silicon GPU for Neural Network.")
-        elif torch.cuda.is_available():
-            self.device = torch.device("cuda:0")
-            print("CUDA available. Using Nvidia GPU for Neural Network.")
-        else:
-            self.device = torch.device("cpu")
-            print("Neither MPS nor CUDA is available. Using CPU for Neural Network.")
+        print(f"Using {self.device} for Neural Network.")
 
     def setup_model(self):
         """Set up the model by initializing hyperparameters and loading cached model if available."""
@@ -140,7 +151,11 @@ class BaseNN(nn.Module):
                      self.nn_arch + " __ " +
                      str(self.kwargs["config"]["learning_rate"]) + " __ " +
                      str(self.kwargs["config"]["batch_size"]) + " __ " +
-                     self.kwargs["config"]["optimizer"]
+                     self.kwargs["config"]["optimizer"] + " __ " +
+                     f"epochs{self.kwargs['config']['epochs']} __ " +
+                     f"seed{self.seed} __ loader{self.dataloader_seed} __ " +
+                     f"{self.device.type} __ "
+                     f"deterministic{int(self.deterministic)} __ v{_MODEL_SCHEMA_VERSION}"
                      )
         
         self.model_path = os.path.join(self.file_attrs['model_dir'], 'objects', f'{self.file_attrs["model_name"]}.pth')
@@ -165,35 +180,23 @@ class BaseNN(nn.Module):
             dict: Dictionary of model performance statistics
         """
 
-        if self.use_cache and self.model_path is not None and os.path.exists(self.model_path):
-            model = self
-            train_loss = self.train_loop_eval_mode(model)
-            val_loss = self.val_loop(model)
-
-        else:
-            model = self
-            
-            # Train model
-
+        if not (self.use_cache and self.model_path is not None and os.path.exists(self.model_path)):
             for epoch in range(self.epochs):
-                train_loss = self.train_loop(model)
-                val_loss = self.val_loop(model)
-
-                # Check for early stopping
-                if self.early_stopping_check(val_loss, epoch) == True:
+                self.train_loop(self)
+                val_loss = self.val_loop(self)
+                if self.early_stopping_check(val_loss, epoch, self):
                     break
-                else:
-                    continue
 
-            # Save model
+            if self.best_state_dict is None:
+                raise RuntimeError("training completed without a best validation state")
+            self.load_state_dict(self.best_state_dict)
+
             if self.use_cache:
-                self.save_model(model, model_path=None)
+                self.save_model(self, model_path=None)
 
-        # Test model
-        if eval == True:
-            return self.evaluate(model)
-        else:
-            return None
+        if eval:
+            return self.evaluate(self)
+        return None
     
     def load_model(self, model_path=None):
         """Load a pre-trained model from disk.
@@ -252,7 +255,6 @@ class BaseNN(nn.Module):
         total_train_loss = 0
         total_samples = 0
 
-        # [TODO] new function to set up train loader if not already done
         if not hasattr(self, 'train_loader'):
             self.train_loader = self.nn_data_processor.setup_train_loader()
 
@@ -263,45 +265,16 @@ class BaseNN(nn.Module):
             self.optimizer.zero_grad()
             outputs = model(inputs)
             loss = self.criterion(outputs, targets)
-            total_train_loss += loss.item()
+            batch_samples = inputs.size(0)
+            total_train_loss += loss.item() * batch_samples
             loss.backward()
             self.optimizer.step()
-            total_samples += inputs.size(0)
+            total_samples += batch_samples
 
         train_loss = total_train_loss / total_samples
 
         return train_loss
     
-    def train_loop_eval_mode(self, model):
-        """Training loop in evaluation mode (no gradients).
-        
-        Args:
-            model: Model to evaluate
-            
-        Returns:
-            float: Average training loss
-        """
-        model.eval()
-        with torch.no_grad():
-            total_train_loss = 0
-            total_samples = 0
-
-            # [TODO] new function to set up train loader if not already done
-            if not hasattr(self, 'train_loader'):
-                self.train_loader = self.nn_data_processor.setup_train_loader()
-
-            for batch in self.train_loader:
-                inputs, targets, __ = batch
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-                targets = targets.unsqueeze(1)
-                outputs = model(inputs)
-                total_train_loss += self.criterion(outputs, targets).item()
-                total_samples += inputs.size(0)
-
-            train_loss = total_train_loss / total_samples
-
-        return train_loss
-
     def val_loop(self, model):
         """Validation loop.
         
@@ -315,7 +288,6 @@ class BaseNN(nn.Module):
         with torch.no_grad():
             total_val_loss = 0
             total_samples = 0
-            # [TODO] new function to set up val loader if not already done
             if not hasattr(self, 'val_loader'):
                 self.val_loader = self.nn_data_processor.setup_val_loader()
                 
@@ -324,8 +296,9 @@ class BaseNN(nn.Module):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 targets = targets.unsqueeze(1)
                 outputs = model(inputs)
-                total_val_loss += self.criterion(outputs, targets).item()
-                total_samples += inputs.size(0)
+                batch_samples = inputs.size(0)
+                total_val_loss += self.criterion(outputs, targets).item() * batch_samples
+                total_samples += batch_samples
 
             val_loss = total_val_loss / total_samples
 
@@ -353,7 +326,6 @@ class BaseNN(nn.Module):
 
         with torch.no_grad():
 
-            # [TODO] new function to set up val and test loaders if not already done
             if not hasattr(self, 'val_loader'):
                 self.val_loader = self.nn_data_processor.setup_val_loader()
             if not hasattr(self, 'test_loader'):
@@ -361,8 +333,6 @@ class BaseNN(nn.Module):
                 
             for index, loader in enumerate([self.val_loader, self.test_loader]):
                 loader_name = loader_names[index]
-                total_loss = 0
-                total_samples = 0
                 y = []
                 y_pred = []
                 original_sequences_list = []
@@ -372,21 +342,20 @@ class BaseNN(nn.Module):
                     inputs, targets = inputs.to(self.device), targets.to(self.device)
                     targets = targets.unsqueeze(1)
                     outputs = model(inputs)
-                    total_loss += self.criterion(outputs, targets).item()
 
                     # Move to CPU and convert to numpy
                     y.extend(targets.cpu().detach().numpy())
                     y_pred.extend(outputs.cpu().detach().numpy())
                     original_sequences_list.extend(original_sequences)
 
-                    total_samples += inputs.size(0)
-
 
                 # Reshape data and get correlation stats
                 y = np.concatenate(y).ravel()
                 y_pred = np.concatenate(y_pred).ravel()
+                y = self.nn_data_processor.inverse_transform_targets(y)
+                y_pred = self.nn_data_processor.inverse_transform_targets(y_pred)
 
-                # Get stats
+                # Get stats in original property units.
                 stats_dict[loader_name] = performance_report(y, y_pred)
 
         # graph results for test set
@@ -396,16 +365,24 @@ class BaseNN(nn.Module):
 
         fig, ax = plt.subplots(figsize=(4, 3))
         
-        # Mark data points that have activity less than 0 or greater than 1.2x the max experimental y value
-        y_max = max(y.max(), y_pred.max()) * 1.2
-        colors = np.where(y_pred > y_max, 'crimson', np.where(y_pred < 0, 'crimson', 'dodgerblue'))
-        y_pred_adjusted = np.clip(y_pred, 0, y_max)
+        # Clip only predictions outside a padded experimental range. This keeps
+        # signed properties visible instead of forcing every plot to start at 0.
+        property_span = float(y.max() - y.min())
+        padding = max(property_span * 0.2, max(abs(float(y.min())), abs(float(y.max()))) * 0.05, 1e-9)
+        plot_min = float(y.min()) - padding
+        plot_max = float(y.max()) + padding
+        colors = np.where(
+            (y_pred < plot_min) | (y_pred > plot_max),
+            'crimson',
+            'dodgerblue',
+        )
+        y_pred_adjusted = np.clip(y_pred, plot_min, plot_max)
 
         # Scatter plot for main graph
         ax.scatter(y_pred_adjusted, y, c=colors, alpha=0.4, edgecolors='w', linewidth=0.5)
 
         # Draw x=y line
-        ax.plot([0, y_max], [0, y_max], 'k--', linewidth=0.5)
+        ax.plot([plot_min, plot_max], [plot_min, plot_max], 'k--', linewidth=0.5)
 
         # Set labels and title for main graph
         ax.text(0.9, 0.1, f'Pearson r={stats_dict["test"]["Pearson r"]:.2f}', fontsize=7, ha='right', va='bottom', transform=ax.transAxes)
@@ -413,7 +390,7 @@ class BaseNN(nn.Module):
         ax.set_xlabel('Predicted Score', fontsize=7)
         ax.set_ylabel('True Score', fontsize=7)
         ax.set_title('Model Performance', fontsize=7)
-        ax.set_xlim(0, y_max)
+        ax.set_xlim(plot_min, plot_max)
 
         # Display model parameters using legend
         model_params = self.file_attrs['model_name'].split('__')  # Assuming '|' separates different parameters
@@ -444,13 +421,14 @@ class BaseNN(nn.Module):
 
         return stats_dict['test']
 
-    def early_stopping_check(self, val_loss, epoch):
+    def early_stopping_check(self, val_loss, epoch, model):
         """Check if early stopping criteria are met.
         
         Args:
             val_loss (float): Current validation loss
             epoch (int): Current epoch number
-            
+            model: Model whose best validation state is tracked
+
         Returns:
             bool: True if training should stop, False otherwise
         """
@@ -458,12 +436,19 @@ class BaseNN(nn.Module):
         val_loss_delta = self.val_loss_min - val_loss
         if val_loss_delta > self.val_loss_delta_min:
             self.val_loss_min = val_loss
+            self.best_validation_loss = val_loss
+            self.best_epoch = epoch
+            self.best_state_dict = {
+                name: tensor.detach().cpu().clone()
+                for name, tensor in model.state_dict().items()
+            }
             self.epochs_no_improve = 0
         else:
             self.epochs_no_improve += 1
 
         # check epoch count
         if self.epochs_no_improve == self.patience:
+            self.stopped_epoch = epoch
             print(f"Early stopping after {epoch} epochs with {self.val_loss_min}.")
             return True
         else:
@@ -484,7 +469,11 @@ class BaseNN(nn.Module):
         self.patience = 15
         self.val_loss_min = float("inf")
         self.val_loss_delta_min = 0.00001
-        self.epochs_no_improve = 0  # initialize epochs_no_improve for early stopping
+        self.epochs_no_improve = 0
+        self.best_epoch = None
+        self.best_validation_loss = None
+        self.best_state_dict = None
+        self.stopped_epoch = None
 
     def custom_predictor(self, X):
         """Make predictions on input data.
@@ -504,7 +493,7 @@ class BaseNN(nn.Module):
             outputs = model(inputs)
             
         outputs_np = outputs.cpu().numpy()
-        return outputs_np
+        return self.nn_data_processor.inverse_transform_targets(outputs_np)
 
     def predict(self, X, batch_size=10000):
         """Make predictions on sequences in batches.
@@ -515,7 +504,6 @@ class BaseNN(nn.Module):
         Returns:
             numpy.ndarray: Array of predictions
         """
-        batch_size = batch_size
         predictions = []
         
         # Process in batches

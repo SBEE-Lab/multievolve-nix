@@ -56,49 +56,59 @@ def load_seqs_file(fnames):
     return seqs, y
 
 def performance_report(y_true, y_pred):
-    """
-    Generate a performance report comparing true and predicted values.
-    
-    Args:
-    - y_true (array-like): True values.
-    - y_pred (array-like): Predicted values.
-    
-    Returns:
-    - dict: Dictionary containing various performance metrics.
+    """Return metrics in original property units.
+
+    NDCG requires nonnegative relevance labels, so signed properties are shifted
+    by their minimum for that metric only. The shift preserves relevance order;
+    MSE, correlations, and top-ranked property summaries use the unmodified
+    values.
     """
     from sklearn.metrics import mean_squared_error, ndcg_score
 
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    if not len(y_true) or len(y_true) != len(y_pred):
+        raise ValueError("y_true and y_pred must be non-empty and have equal length")
+    if not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
+        raise ValueError("y_true and y_pred must contain only finite values")
 
-    y_true, y_pred = y_true.reshape(-1,), y_pred.reshape(-1,)
+    ranked_true = y_true[np.argsort(-y_pred, kind="stable")]
+    top_10 = ranked_true[:10]
+    top_1_percentile = ranked_true[min(int(len(ranked_true) * 0.01), len(ranked_true) - 1)]
+    top_0_1_percentile = ranked_true[
+        min(int(len(ranked_true) * 0.001), len(ranked_true) - 1)
+    ]
 
-    top_10_min = y_true[np.argsort(-y_pred)[:10]].min()
-    top_10_mean = y_true[np.argsort(-y_pred)[:10]].mean()
-    top_10_max = y_true[np.argsort(-y_pred)[:10]].max()
-    top_1_percentile_min = y_true[np.argsort(-y_pred)[int(len(y_true)*0.01)]].min()
-    top_1_percentile_mean = y_true[np.argsort(-y_pred)[int(len(y_true)*0.01)]].mean()
-    top_1_percentile_max = y_true[np.argsort(-y_pred)[int(len(y_true)*0.01)]].max()
-    top_0_1_percentile_min = y_true[np.argsort(-y_pred)[int(len(y_true)*0.001)]].min()
-    top_0_1_percentile_mean = y_true[np.argsort(-y_pred)[int(len(y_true)*0.001)]].mean()
-    top_0_1_percentile_max = y_true[np.argsort(-y_pred)[int(len(y_true)*0.001)]].max()
+    if len(y_true) < 2 or np.ptp(y_true) == 0 or np.ptp(y_pred) == 0:
+        spearman_r = spearman_p = pearson_r = pearson_p = float("nan")
+    else:
+        spearman = ss.spearmanr(y_true, y_pred)
+        pearson = ss.pearsonr(y_true, y_pred)
+        spearman_r, spearman_p = spearman.correlation, spearman.pvalue
+        pearson_r, pearson_p = pearson.correlation, pearson.pvalue
 
+    ndcg_relevance = y_true - min(float(y_true.min()), 0.0)
+    ndcg = (
+        float("nan")
+        if len(y_true) < 2
+        else ndcg_score([ndcg_relevance], [y_pred])
+    )
     return {
         'MSE': mean_squared_error(y_true, y_pred),
-        'Spearman r': ss.spearmanr(y_true, y_pred).correlation,
-        'Spearman p': ss.spearmanr(y_true, y_pred).pvalue,
-        'Pearson r': ss.pearsonr(y_true, y_pred).correlation,
-        'Pearson p': ss.pearsonr(y_true, y_pred).pvalue,
-        'NDCG': ndcg_score([y_true], [y_pred]),
-        'Top 10 Min': top_10_min,
-        'Top 10 Mean': top_10_mean,
-        'Top 10 Max': top_10_max,
-        'Top 1% Min': top_1_percentile_min,
-        'Top 1% Mean': top_1_percentile_mean,
-        'Top 1% Max': top_1_percentile_max,
-        'Top 0.1% Min': top_0_1_percentile_min,
-        'Top 0.1% Mean': top_0_1_percentile_mean,
-        'Top 0.1% Max': top_0_1_percentile_max
+        'Spearman r': spearman_r,
+        'Spearman p': spearman_p,
+        'Pearson r': pearson_r,
+        'Pearson p': pearson_p,
+        'NDCG': ndcg,
+        'Top 10 Min': top_10.min(),
+        'Top 10 Mean': top_10.mean(),
+        'Top 10 Max': top_10.max(),
+        'Top 1% Min': top_1_percentile,
+        'Top 1% Mean': top_1_percentile,
+        'Top 1% Max': top_1_percentile,
+        'Top 0.1% Min': top_0_1_percentile,
+        'Top 0.1% Mean': top_0_1_percentile,
+        'Top 0.1% Max': top_0_1_percentile,
     }
 
 def log_results(stats_dict, model_object):
@@ -202,13 +212,13 @@ def mutational_pool_to_dict(mutational_pool, increase_wt=False):
     
     for key in mutations_dict:
         mut = mutations_dict[key][0]
-        wt, pos, mt = mut[0], mut[1:-1], mut[-1]
+        wt, pos = mut[0], mut[1:-1]
         wt_value = wt+pos+wt
         
         if wt_value not in mutations_dict[key]:
             mutations_dict[key].append(wt_value)
 
-        if increase_wt == True:
+        if increase_wt:
             total_mutants = len(mutations_dict[key]) - 2
             for i in range(total_mutants):
                 mutations_dict[key].append(wt_value)
@@ -227,7 +237,6 @@ def wt_only_mutational_pool_to_dict(mutational_pool, wt_seq):
     - dict: Dictionary with positions as keys and lists of wild-type mutations as values.
     """
     wt_mutations_dict = {}
-    pos = []
 
     for mutation in mutational_pool:
         number = int(re.search(r'\d+', mutation).group())

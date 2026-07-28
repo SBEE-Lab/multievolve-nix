@@ -153,12 +153,20 @@ class BaseProposer:
         if self.proposals is None:
             raise ValueError("No proposals have been made.")
 
-        for model in tqdm(self.models):
+        prediction_columns = []
+        for index, model in enumerate(tqdm(self.models)):
             print(f"Evaluating proposals with model: {model.file_attrs['model_name']}")
-            self.proposals[model.file_attrs['model_name']] = model.predict(self.proposals["Full_Sequence"])
-        
-        # Calculate average across all models
-        self.proposals['average'] = self.proposals.iloc[:,-len(self.models):].mean(axis=1)
+            column = f"model_{index + 1}_prediction"
+            self.proposals[column] = model.predict(self.proposals["Full_Sequence"])
+            prediction_columns.append(column)
+
+        predictions = self.proposals[prediction_columns]
+        self.proposals['prediction_mean'] = predictions.mean(axis=1)
+        self.proposals['prediction_std'] = predictions.std(axis=1, ddof=0)
+        self.proposals['prediction_min'] = predictions.min(axis=1)
+        self.proposals['prediction_max'] = predictions.max(axis=1)
+        self.proposals['ensemble_n'] = len(prediction_columns)
+        self.proposals['average'] = self.proposals['prediction_mean']
 
 
     def get_variables(self) -> dict:

@@ -7,12 +7,14 @@ back instead of querying W&B run history.
 """
 
 import itertools
+import json
 import os
 
 import pandas as pd
 import yaml
 
 from multievolve.utils.paths import get_output_root
+from multievolve.utils.reproducibility import seed_everything, stable_seed
 
 # sweep_configs lives in the predictors package, next to this utils package.
 SWEEP_CONFIG_DIR = os.path.join(
@@ -46,6 +48,17 @@ def results_path(experiment_name):
     return os.path.join(results_dir(), f"{experiment_name}.csv")
 
 
+def manifest_path(experiment_name):
+    return os.path.join(results_dir(), f"{experiment_name}.manifest.json")
+
+
+def write_manifest(experiment_name, manifest):
+    os.makedirs(results_dir(), exist_ok=True)
+    with open(manifest_path(experiment_name), "w") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
 def run_local_sweep(
     splits,
     features,
@@ -56,6 +69,9 @@ def run_local_sweep(
     search_method="grid",
     count=10,
     show_plots=True,
+    seed=42,
+    deterministic=False,
+    device="auto",
 ):
     """Train every (split, feature, model, grid-config) and record metrics.
 
@@ -69,7 +85,7 @@ def run_local_sweep(
         )
 
     rows = []
-    for split in splits:
+    for fold_index, split in enumerate(splits):
         for feature in features:
             for model in models:
                 yaml_file = _CONFIG_MAP.get((model.__name__, sweep_depth, search_method))
@@ -81,8 +97,29 @@ def run_local_sweep(
                 with open(os.path.join(SWEEP_CONFIG_DIR, yaml_file)) as f:
                     sweep_config = yaml.safe_load(f)
                 for config in _grid_configs(sweep_config):
+                    condition = json.dumps(config, sort_keys=True, separators=(",", ":"))
+                    model_seed = stable_seed(
+                        seed,
+                        "train",
+                        fold_index,
+                        feature.name,
+                        model.__name__,
+                        condition,
+                    )
+                    seed_everything(model_seed, deterministic=deterministic)
+                    model_config = {
+                        **config,
+                        "seed": model_seed,
+                        "dataloader_seed": stable_seed(model_seed, "dataloader"),
+                        "deterministic": deterministic,
+                        "device": device,
+                    }
                     instance = model(
-                        split, feature, use_cache=use_cache, config=config, show_plots=show_plots
+                        split,
+                        feature,
+                        use_cache=use_cache,
+                        config=model_config,
+                        show_plots=show_plots,
                     )
                     test_stats = instance.run_model()  # stats_dict['test']
                     rows.append(
@@ -95,12 +132,18 @@ def run_local_sweep(
                             "Spearman - Test": test_stats["Spearman r"],
                             "Pearson - Test": test_stats["Pearson r"],
                             "name": instance.file_attrs.get("model_name", ""),
+                            "Model Seed": model_seed,
+                            "Best Epoch": instance.best_epoch,
+                            "Best Validation Loss": instance.best_validation_loss,
+                            "Stopped Epoch": instance.stopped_epoch,
                         }
                     )
 
     os.makedirs(results_dir(), exist_ok=True)
-    pd.DataFrame(rows).to_csv(results_path(experiment_name), index=False)
+    results = pd.DataFrame(rows)
+    results.to_csv(results_path(experiment_name), index=False)
     print(f"Wrote {len(rows)} sweep result(s) to {results_path(experiment_name)}")
+    return results
 
 
 def load_sweep_results(experiment_name):

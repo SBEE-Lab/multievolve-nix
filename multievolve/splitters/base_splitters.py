@@ -1,6 +1,6 @@
 import random
 import pandas as pd
-from abc import ABC, abstractmethod
+from abc import ABC
 from Bio import SeqIO, PDB
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
@@ -9,11 +9,13 @@ import copy
 import shutil
 
 import os
-import sys
 
 from multievolve.utils.paths import get_output_root
 from multievolve.utils.other_utils import aa_dict_3to1
 from multievolve.utils.data_utils import find_mutation_positions_multithreaded, MutationFormat
+from multievolve.utils.reproducibility import stable_seed
+
+_SPLIT_SCHEMA_VERSION = 2
 
 class BaseSplitter(ABC):
     """Abstract base class for splitters."""
@@ -151,7 +153,7 @@ class ProteinSplitter(BaseSplitter):
                          **kwargs)
         
         # Define base protein splitter path
-        if y_scaling == False:
+        if not y_scaling:
             self.y_scaling = "y_unscaled"
         else:
             self.y_scaling = "y_scaled"
@@ -159,7 +161,10 @@ class ProteinSplitter(BaseSplitter):
         self.val_split = val_split
         self.kfold_splits = False
 
-        self.file_attrs['base_splitter_path'] = os.path.join(self.file_attrs['split_dir'], "base_splitter" + '_' + self.y_scaling + ".pkl")
+        self.file_attrs['base_splitter_path'] = os.path.join(
+            self.file_attrs['split_dir'],
+            f"base_splitter_{self.y_scaling}_v{_SPLIT_SCHEMA_VERSION}.pkl",
+        )
 
         # Load existing base protein splitter or create a new one
         if self.use_cache and os.path.exists(self.file_attrs['base_splitter_path']):
@@ -185,10 +190,8 @@ class ProteinSplitter(BaseSplitter):
             self.data['muts'] = self.data[0].apply(lambda x: MutationFormat(x, self.wt_seq).to_mutation_string())
             self.data['mut_load'] = self.data['mut_positions'].apply(lambda x: len(x))
 
-            if y_scaling == True:
-                scaler = MinMaxScaler()
-                scaled_data = scaler.fit_transform(np.array(self.data[1]).reshape(-1, 1))
-                self.data[1] = scaled_data
+            # Target scaling is fit separately on each fold's training labels in
+            # _save_splits() to avoid leaking held-out label ranges.
 
             # save as pickle file
             if self.use_cache:
@@ -247,52 +250,97 @@ class ProteinSplitter(BaseSplitter):
 
         # 0 for train, 1 for test, 2 for val
 
+        split_identity = f"seed{self.random_state}"
+        if hasattr(self, "fold_count"):
+            split_identity += f"_folds{self.fold_count}"
+
         if self.val_split is not None:
 
-            if self.kfold_splits == True:
+            if self.kfold_splits:
                 pass
             else:
                 # Separate train set into train and val sets
                 rows_with_marker_0 = self.data[self.data['group'] == 0]
                 num_to_sample = int(len(rows_with_marker_0) * self.val_split)
-                sampled_indices = rows_with_marker_0.sample(n=num_to_sample).index
+                if num_to_sample < 1:
+                    raise ValueError(
+                        "validation split is empty; increase the dataset size or val_split"
+                    )
+                validation_seed = (
+                    None
+                    if self.random_state is None
+                    else stable_seed(
+                        self.random_state,
+                        "validation",
+                        self.split_type,
+                        -1 if iter is None else iter,
+                    )
+                )
+                sampled_indices = rows_with_marker_0.sample(
+                    n=num_to_sample,
+                    random_state=validation_seed,
+                ).index
                 self.data.loc[sampled_indices, 'group'] = 2
 
             X_train = self.data[self.data['group'] == 0][0].values
             X_val = self.data[self.data['group'] == 2][0].values
             X_test = self.data[self.data['group'] == 1][0].values
-            y_train = self.data[self.data['group'] == 0][1].values
-            y_val = self.data[self.data['group'] == 2][1].values
-            y_test = self.data[self.data['group'] == 1][1].values
+            y_train = self.data[self.data['group'] == 0][1].to_numpy(dtype=float)
+            y_val = self.data[self.data['group'] == 2][1].to_numpy(dtype=float)
+            y_test = self.data[self.data['group'] == 1][1].to_numpy(dtype=float)
+
+            if not len(X_train) or not len(X_val) or not len(X_test):
+                raise ValueError("every fold must contain non-empty train, validation, and test sets")
+
+            target_scaler = None
+            if self.y_scaling == "y_scaled":
+                target_scaler = MinMaxScaler()
+                y_train = target_scaler.fit_transform(y_train.reshape(-1, 1)).ravel()
+                y_val = target_scaler.transform(y_val.reshape(-1, 1)).ravel()
+                y_test = target_scaler.transform(y_test.reshape(-1, 1)).ravel()
 
             train_size = len(X_train) / len(self.data)
             val_size = len(X_val) / len(self.data)
 
-            # return splits
-            # initialize dictionary to store splits
-            self.splits = {'X_train': X_train, 'X_val': X_val, 'X_test': X_test, 'y_train': y_train, 'y_val': y_val, 'y_test': y_test}
+            self.splits = {
+                'X_train': X_train,
+                'X_val': X_val,
+                'X_test': X_test,
+                'y_train': y_train,
+                'y_val': y_val,
+                'y_test': y_test,
+                'target_scaler': target_scaler,
+            }
 
-
-            # check if iter is none:
             if iter is None:
-                split_name = f'split_by_{self.split_type}_{int(train_size*100)}-{int(val_size*100)}-{int(test_size*100)}-{self.y_scaling}'
+                split_name = f'split_by_{self.split_type}_{int(train_size*100)}-{int(val_size*100)}-{int(test_size*100)}-{self.y_scaling}_{split_identity}_v{_SPLIT_SCHEMA_VERSION}'
             else:
-                split_name = f'split_by_{self.split_type}_{int(train_size*100)}-{int(val_size*100)}-{int(test_size*100)}-{self.y_scaling}_iter{iter}'
+                split_name = f'split_by_{self.split_type}_{int(train_size*100)}-{int(val_size*100)}-{int(test_size*100)}-{self.y_scaling}_iter{iter}_{split_identity}_v{_SPLIT_SCHEMA_VERSION}'
             
         else:
             X_train = self.data[self.data['group'] == 0][0].values
             X_test = self.data[self.data['group'] == 1][0].values
-            y_train = self.data[self.data['group'] == 0][1].values
-            y_test = self.data[self.data['group'] == 1][1].values
+            y_train = self.data[self.data['group'] == 0][1].to_numpy(dtype=float)
+            y_test = self.data[self.data['group'] == 1][1].to_numpy(dtype=float)
 
-            # initialize dictionary to store splits
-            self.splits = {'X_train': X_train, 'X_test': X_test, 'y_train': y_train, 'y_test': y_test}
-            
-            # check if iter is none:
+            target_scaler = None
+            if self.y_scaling == "y_scaled":
+                target_scaler = MinMaxScaler()
+                y_train = target_scaler.fit_transform(y_train.reshape(-1, 1)).ravel()
+                y_test = target_scaler.transform(y_test.reshape(-1, 1)).ravel()
+
+            self.splits = {
+                'X_train': X_train,
+                'X_test': X_test,
+                'y_train': y_train,
+                'y_test': y_test,
+                'target_scaler': target_scaler,
+            }
+
             if iter is None:
-                split_name = f'split_by_{self.split_type}_{int((1-test_size)*100)}-{int(test_size*100)}-{self.y_scaling}'
+                split_name = f'split_by_{self.split_type}_{int((1-test_size)*100)}-{int(test_size*100)}-{self.y_scaling}_{split_identity}_v{_SPLIT_SCHEMA_VERSION}'
             else:
-                split_name = f'split_by_{self.split_type}_{int((1-test_size)*100)}-{int(test_size*100)}-{self.y_scaling}_iter{iter}'
+                split_name = f'split_by_{self.split_type}_{int((1-test_size)*100)}-{int(test_size*100)}-{self.y_scaling}_iter{iter}_{split_identity}_v{_SPLIT_SCHEMA_VERSION}'
 
         # Save split or load split if it already exists to prevent overwriting
         self.splits['split_name'] = split_name
@@ -318,8 +366,7 @@ class ProteinSplitter(BaseSplitter):
         - k_folds (int): Number of folds.
         """
 
-        if self.random_state is not None:
-            np.random.seed(self.random_state)
+        rng = np.random.default_rng(self.random_state)
 
         # initialize fold columns
         self.data['fold'] = None
@@ -328,7 +375,7 @@ class ProteinSplitter(BaseSplitter):
         train_indices = self.data[self.data['group'] == 0].index
 
         # Shuffle the indices
-        shuffled_indices = np.random.permutation(train_indices)
+        shuffled_indices = rng.permutation(train_indices)
 
         # Determine the number of points per fold
         fold_sizes = [len(shuffled_indices) // k_folds] * k_folds
@@ -336,7 +383,6 @@ class ProteinSplitter(BaseSplitter):
             fold_sizes[i] += 1
 
         # Assign fold labels
-        groups = np.zeros(len(self.data), dtype=int)
         current_idx = 0
         for fold_idx, fold_size in enumerate(fold_sizes):
             for i in range(current_idx, current_idx + fold_size):
@@ -413,11 +459,10 @@ class KFoldProteinSplitter(ProteinSplitter):
         - n_splits (int): Number of folds.
         """
     
-        if self.random_state is not None:
-            np.random.seed(self.random_state)
-        
-        # Shuffle the DataFrame indices
-        shuffled_indices = np.random.permutation(self.data.index)
+        rng = np.random.default_rng(self.random_state)
+
+        # Shuffle the DataFrame indices without mutating NumPy's global RNG.
+        shuffled_indices = rng.permutation(self.data.index)
         
         # Determine the number of points per fold
         fold_sizes = [len(shuffled_indices) // n_splits] * n_splits
@@ -425,15 +470,15 @@ class KFoldProteinSplitter(ProteinSplitter):
             fold_sizes[i] += 1
         
         # Assign fold labels
-        groups = np.zeros(len(self.data), dtype=int)
+        groups = pd.Series(index=self.data.index, dtype=int)
         current_idx = 0
         for fold_idx, fold_size in enumerate(fold_sizes):
-            for i in range(current_idx, current_idx + fold_size):
-                groups[shuffled_indices[i]] = fold_idx
+            fold_indices = shuffled_indices[current_idx:current_idx + fold_size]
+            groups.loc[fold_indices] = fold_idx
             current_idx += fold_size
-        
+
         # Add 'group' column to the DataFrame
-        self.data['fold'] = groups
+        self.data['fold'] = groups.astype(int)
 
     def _split_data(self, fold_number):
         """
@@ -452,17 +497,20 @@ class KFoldProteinSplitter(ProteinSplitter):
         self._save_splits()
 
     def generate_splits(self, n_splits):
-      
-      self._assign_folds(n_splits=n_splits)
+        if n_splits < 2:
+            raise ValueError("at least 2 folds are required")
+        if n_splits > len(self.data):
+            raise ValueError("fold count cannot exceed the number of dataset rows")
 
-      splits = []
-      for fold_num in range(n_splits):
-          self._split_data(fold_number=fold_num)
-          # Create a deep copy of self and add it to splits
-          split_copy = copy.deepcopy(self)
-          splits.append(split_copy)
-      
-      return splits
+        self.fold_count = n_splits
+        self._assign_folds(n_splits=n_splits)
+
+        splits = []
+        for fold_num in range(n_splits):
+            self._split_data(fold_number=fold_num)
+            splits.append(copy.deepcopy(self))
+
+        return splits
 
 class RoundProteinSplitter(ProteinSplitter):
     """

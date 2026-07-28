@@ -539,7 +539,7 @@ class TorchDataProcessor:
         train_dataset, val_dataset, test_dataset (TorchCustomDataset): PyTorch datasets.
         train_loader, val_loader, test_loader (DataLoader): PyTorch DataLoaders.
     """
-    def __init__(self, split, featurizer, batch_size):
+    def __init__(self, split, featurizer, batch_size, seed=42):
         """
         Initialize TorchDataProcessor.
         
@@ -547,6 +547,7 @@ class TorchDataProcessor:
         - split (object): Object containing data splits.
         - featurizer (object): Object to featurize sequences.
         - batch_size (int): Batch size for data loading.
+        - seed (int): Seed for deterministic training-data shuffling.
         """
         self.featurizer = featurizer
         (
@@ -568,6 +569,8 @@ class TorchDataProcessor:
         )
 
         self.bs = batch_size
+        self.seed = int(seed)
+        self.target_scaler = split.splits.get('target_scaler')
 
     def featurize(self, X):
         """
@@ -598,7 +601,14 @@ class TorchDataProcessor:
             self.X_train
         )
         
-        self.train_loader = DataLoader(self.train_dataset, batch_size=self.bs, shuffle=True)
+        generator = torch.Generator()
+        generator.manual_seed(self.seed)
+        self.train_loader = DataLoader(
+            self.train_dataset,
+            batch_size=self.bs,
+            shuffle=True,
+            generator=generator,
+        )
         return self.train_loader
     
     def setup_val_loader(self):
@@ -617,7 +627,7 @@ class TorchDataProcessor:
             self.X_val
         )
         
-        self.val_loader = DataLoader(self.val_dataset, batch_size=self.bs, shuffle=True)
+        self.val_loader = DataLoader(self.val_dataset, batch_size=self.bs, shuffle=False)
         return self.val_loader
     
     def setup_test_loader(self):
@@ -636,13 +646,18 @@ class TorchDataProcessor:
             self.X_test
         )
         
-        self.test_loader = DataLoader(self.test_dataset, batch_size=self.bs, shuffle=True)
+        self.test_loader = DataLoader(self.test_dataset, batch_size=self.bs, shuffle=False)
         return self.test_loader
 
+    def inverse_transform_targets(self, values):
+        """Convert scaled targets or predictions back to original property units."""
+        values = np.asarray(values, dtype=float).reshape(-1, 1)
+        if self.target_scaler is None:
+            return values.ravel()
+        return self.target_scaler.inverse_transform(values).ravel()
+
     def preprocess_data(self):
-        """
-        Set up all data loaders.
-        """
+        """Set up all data loaders."""
         self.setup_train_loader()
-        self.setup_val_loader() 
+        self.setup_val_loader()
         self.setup_test_loader()
