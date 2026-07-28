@@ -8,13 +8,23 @@ This app provides an interactive web app to:
 4. Perform zero-shot predictions with protein language models
 """
 
+import logging
 import subprocess
 import sys
-from pathlib import Path
 
-import pandas as pd
 import streamlit as st
-from Bio import SeqIO
+
+from multievolve.app_io import (
+    AppInputError,
+    prepare_uploaded_inputs,
+    validate_identifier,
+)
+
+logger = logging.getLogger(__name__)
+
+_IDENTIFIER_HELP = (
+    "Start with a letter or number and use only letters, numbers, '.', '_', or '-'."
+)
 
 def setup_page():
     """Configure basic Streamlit page settings"""
@@ -86,88 +96,49 @@ def setup_page():
         </style>
     """, unsafe_allow_html=True)
 
-def create_protein_directory(protein_name):
-    """
-    Create directory structure for a protein project
-
-    Args:
-        protein_name (str): Name of the protein project
-
-    Returns:
-        Path: Path object pointing to protein directory
-    """
-    protein_dir = Path("proteins") / protein_name
-    protein_dir.mkdir(parents=True, exist_ok=True)
-
-    return protein_dir
-
-def save_uploaded_file(uploaded_file, protein_dir):
-    """
-    Save an uploaded file to the protein directory
-
-    Args:
-        uploaded_file (UploadedFile): Streamlit uploaded file
-        protein_dir (Path): Path to protein directory
-
-    Returns:
-        Path: Path to saved file
-    """
-
-    if uploaded_file is None:
+def validate_files(
+    protein_name,
+    *,
+    wt_files_aa=None,
+    wt_file_aa=None,
+    wt_file_dna=None,
+    dataset_file=None,
+    mutations_file=None,
+    pdb_files=None,
+):
+    """Validate and persist browser uploads, returning canonical trusted paths."""
+    try:
+        return prepare_uploaded_inputs(
+            protein_name,
+            wt_files_aa=wt_files_aa,
+            wt_file_aa=wt_file_aa,
+            wt_file_dna=wt_file_dna,
+            dataset_file=dataset_file,
+            mutations_file=mutations_file,
+            pdb_files=pdb_files,
+        )
+    except AppInputError as exc:
+        st.error(str(exc))
+        return None
+    except Exception:
+        logger.exception("Unexpected failure while preparing uploaded files")
+        st.error("Unexpected upload failure. Check the service logs for details.")
         return None
 
-    save_path = protein_dir / uploaded_file.name
-    with open(save_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    return save_path
 
-def validate_files(protein_name, wt_files_aa=None, wt_file_aa=None,wt_file_dna=None, dataset_file=None, mutations_file=None, pdb_files=None):
-    """Validate uploaded files with protein-specific directory handling"""
+def validate_name(value, label):
+    """Display an actionable error for an invalid artifact identifier."""
     try:
-        protein_dir = create_protein_directory(protein_name)
+        return validate_identifier(value, label)
+    except AppInputError as exc:
+        st.error(str(exc))
+        return None
 
-        # Validate and save FASTA
-        if wt_files_aa:
-            for wt_file_aa in wt_files_aa:
-                fasta_path = save_uploaded_file(wt_file_aa, protein_dir)
-                SeqIO.read(fasta_path, "fasta")
-        elif wt_file_aa:
-            fasta_path = save_uploaded_file(wt_file_aa, protein_dir)
-            SeqIO.read(fasta_path, "fasta")
 
-        if wt_file_dna:
-            fasta_path = save_uploaded_file(wt_file_dna, protein_dir)
-            SeqIO.read(fasta_path, "fasta")
 
-        # Validate and save dataset CSV
-        if dataset_file:
-            dataset_path = save_uploaded_file(dataset_file, protein_dir)
-            df = pd.read_csv(dataset_path)
-            required_cols = ['mutation', 'property_value']
-            if not all(col in df.columns for col in required_cols):
-                st.error("Training dataset must contain 'mutation' and 'property_value' columns")
-                return False
 
-        # Validate and save mutation pool
-        if mutations_file:
-            pool_path = save_uploaded_file(mutations_file, protein_dir)
-            df = pd.read_csv(pool_path, header=None)
-            if df.empty:
-                st.error("Mutation pool file is empty")
-                return False
 
-        if pdb_files:
-            for pdb_file in pdb_files:
-                pdb_path = save_uploaded_file(pdb_file, protein_dir)
-                if not str(pdb_path).endswith('.pdb') and not str(pdb_path).endswith('.cif'):
-                    st.error("PDB/CIF files must be in PDB or CIF format")
-                    return False
 
-        return True
-
-    except Exception as e:
-        st.error(f"File validation error: {str(e)}")
-        return False
 
 def train_models():
     """Train neural network models section"""
@@ -176,11 +147,13 @@ def train_models():
         col1, col2 = st.columns([2,3])
 
         with col1:
-            protein_name = st.text_input("Protein Name")
+            protein_name = st.text_input("Protein Name", help=_IDENTIFIER_HELP)
             wt_files_aa = st.file_uploader("Upload Wildtype Amino Acid Sequence FASTA", accept_multiple_files=True, type=['fasta', 'fa'])
             dataset_file = st.file_uploader("Upload Training Dataset (CSV)", type=['csv'], accept_multiple_files=False)
             st.divider()
-            experiment_name = st.text_input("Experiment Name", value="test")
+            experiment_name = st.text_input(
+                "Experiment Name", value="test", help=_IDENTIFIER_HELP
+            )
             mode = st.selectbox("Training Mode", ["test", "standard"])
             seed = st.number_input("Seed", min_value=0, max_value=2**32 - 1, value=42)
             split_seed = st.number_input("Split Seed", min_value=0, max_value=2**32 - 1, value=42)
@@ -216,13 +189,20 @@ def train_models():
             st.error("Please fill in all required fields")
             return
 
-        if not validate_files(protein_name, wt_files_aa=wt_files_aa, dataset_file=dataset_file):
+        experiment_name = validate_name(experiment_name, "Experiment name")
+        if experiment_name is None:
+            return
+        prepared = validate_files(
+            protein_name,
+            wt_files_aa=wt_files_aa,
+            dataset_file=dataset_file,
+        )
+        if prepared is None:
             return
 
         try:
-            protein_dir = Path("proteins") / protein_name
-            wt_paths = [protein_dir / wt_file_aa.name for wt_file_aa in wt_files_aa]
-            dataset_path = protein_dir / dataset_file.name
+            wt_paths = prepared.wt_files_aa
+            dataset_path = prepared.dataset_file
 
             # Show the command that will be executed
             command = [
@@ -290,12 +270,16 @@ def propose_mutations():
         col1, col2 = st.columns([2,3])
 
         with col1:
-            protein_name = st.text_input("Protein Name", key="propose_protein")
+            protein_name = st.text_input(
+                "Protein Name", key="propose_protein", help=_IDENTIFIER_HELP
+            )
             wt_files_aa = st.file_uploader("Upload Wildtype Amino Acid Sequence FASTA", accept_multiple_files=True, type=['fasta', 'fa'], key="propose_wt")
             dataset_file = st.file_uploader("Upload Training Dataset (CSV)", type=['csv'], key="propose_dataset")
             mutation_pool = st.file_uploader("Upload Mutation Pool (CSV)", type=['csv'])
             st.divider()
-            experiment_name = st.text_input("Experiment Name", key="propose_exp")
+            experiment_name = st.text_input(
+                "Experiment Name", key="propose_exp", help=_IDENTIFIER_HELP
+            )
             min_mutations = st.number_input("Minimum Mutations", min_value=2, value=3)
             max_mutations = st.number_input("Maximum Mutations", min_value=2, value=10)
             top_muts = st.number_input("Top Mutations per Load", min_value=1, value=3)
@@ -305,7 +289,11 @@ def propose_mutations():
             ensemble_folds = st.number_input("Ensemble Folds", min_value=2, value=10)
             device = st.selectbox("Training Device", ["auto", "cpu", "cuda"], key="propose_device")
             deterministic = st.checkbox("Deterministic Mode", value=False, key="propose_deterministic")
-            export_name = st.text_input("Export Name", value="multievolve_proposals")
+            export_name = st.text_input(
+                "Export Name",
+                value="multievolve_proposals",
+                help=_IDENTIFIER_HELP,
+            )
 
         with col2:
             st.markdown("""
@@ -345,14 +333,23 @@ def propose_mutations():
             st.error("Minimum Mutations must be less than or equal to Maximum Mutations")
             return
 
-        if not validate_files(protein_name, wt_files_aa=wt_files_aa, dataset_file=dataset_file, mutations_file=mutation_pool):
+        experiment_name = validate_name(experiment_name, "Experiment name")
+        export_name = validate_name(export_name, "Export name")
+        if experiment_name is None or export_name is None:
+            return
+        prepared = validate_files(
+            protein_name,
+            wt_files_aa=wt_files_aa,
+            dataset_file=dataset_file,
+            mutations_file=mutation_pool,
+        )
+        if prepared is None:
             return
 
         try:
-            protein_dir = Path("proteins") / protein_name
-            wt_paths = [protein_dir / wt_file_aa.name for wt_file_aa in wt_files_aa]
-            dataset_path = protein_dir / dataset_file.name
-            mutation_pool_path = protein_dir / mutation_pool.name
+            wt_paths = prepared.wt_files_aa
+            dataset_path = prepared.dataset_file
+            mutation_pool_path = prepared.mutations_file
 
             # Show the command that will be executed
             command = [
@@ -425,7 +422,11 @@ def design_oligos():
         col1, col2 = st.columns([2,3])
 
         with col1:
-            protein_name = st.text_input("Protein Name", key="MULTI-assembly_protein")
+            protein_name = st.text_input(
+                "Protein Name",
+                key="MULTI-assembly_protein",
+                help=_IDENTIFIER_HELP,
+            )
             wt_file_dna = st.file_uploader("Upload Wildtype DNA Sequence FASTA", type=['fasta', 'fa'], key="oligo_wt")
             mutations_file = st.file_uploader("Upload Mutations File (CSV)", type=['csv'])
             st.divider()
@@ -472,13 +473,17 @@ def design_oligos():
             st.error("Please fill in all required fields")
             return
 
-        if not validate_files(protein_name, wt_file_dna=wt_file_dna, mutations_file=mutations_file):
+        prepared = validate_files(
+            protein_name,
+            wt_file_dna=wt_file_dna,
+            mutations_file=mutations_file,
+        )
+        if prepared is None:
             return
 
         try:
-            protein_dir = Path("proteins") / protein_name
-            mutations_path = protein_dir / mutations_file.name
-            wt_path = protein_dir / wt_file_dna.name
+            mutations_path = prepared.mutations_file
+            wt_path = prepared.wt_file_dna
 
             # Show the command that will be executed
             command = [
@@ -542,7 +547,9 @@ def zeroshot_predictions():
         col1, col2 = st.columns([2,3])
 
         with col1:
-            protein_name = st.text_input("Protein Name", key="zeroshot_protein")
+            protein_name = st.text_input(
+                "Protein Name", key="zeroshot_protein", help=_IDENTIFIER_HELP
+            )
             wt_file_aa = st.file_uploader("Upload Wildtype Amino Acid Sequence FASTA", type=['fasta', 'fa'], key="zeroshot_wt")
             pdb_files = st.file_uploader("Upload PDB/CIF Files", type=['pdb', 'cif'], accept_multiple_files=True, key="zeroshot_pdb")
             st.divider()
@@ -581,14 +588,17 @@ def zeroshot_predictions():
             st.error("Please fill in all required fields")
             return
 
-        if not validate_files(protein_name, wt_file_aa=wt_file_aa, pdb_files=pdb_files):
+        prepared = validate_files(
+            protein_name,
+            wt_file_aa=wt_file_aa,
+            pdb_files=pdb_files,
+        )
+        if prepared is None:
             return
 
         try:
-            protein_dir = Path("proteins") / protein_name
-            wt_path = protein_dir / wt_file_aa.name
-            pdb_paths = [protein_dir / pdb_file.name for pdb_file in pdb_files]
-
+            wt_path = prepared.wt_file_aa
+            pdb_paths = prepared.pdb_files
 
             # Show the command that will be executed
             command = [

@@ -102,10 +102,17 @@ those environment variables, when state should live elsewhere. Because the unit
 uses `ProtectHome` and `PrivateTmp`, choose a persistent path outside `/home`,
 `/root`, `/tmp`, and `/var/tmp`.
 
+The Streamlit application accepts project, experiment, and export names that
+start with a letter or number and contain only letters, numbers, `.`, `_`, or
+`-`. Uploaded files must use the corresponding FASTA, CSV, PDB, or CIF suffix
+and a unique basename using the same character set within each submission.
+These boundaries keep browser uploads inside the selected project directory.
+
 The Streamlit application does not provide authentication or per-user workspace
-isolation. Do not expose it by setting `host = "0.0.0.0"` and `openFirewall =
-true` on an untrusted network. Put non-loopback deployments behind an
-authenticated TLS reverse proxy and restrict network access.
+isolation. All sessions share the configured state root. Do not expose it by
+setting `host = "0.0.0.0"` and `openFirewall = true` on an untrusted network.
+Put non-loopback deployments behind an authenticated TLS reverse proxy and
+restrict network access.
 
 CUDA execution additionally requires an NVIDIA driver compatible with the
 packaged CUDA runtime and a working NixOS NVIDIA/OpenGL configuration. Systems
